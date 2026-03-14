@@ -35,7 +35,7 @@ Express + Socket.IO + Prisma + PostgreSQL backend initialization for Roamer.
 - `chat:message` with `{ conversationId, content, senderId }`
 
 ## Notes
-- Backend is initialized only (no frontend integration yet).
+- Auth login/register is implemented with `bcrypt` + `JWT` and stored in `httpOnly` cookie.
 - Prisma schema already covers users/roles/identity verification, complex listings, groups/offers/contracts, rentals, chat, notifications, promotions, garage, analytics.
 
 ## Controller Architecture
