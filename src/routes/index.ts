@@ -1,0 +1,30 @@
+import { Router } from "express";
+import { healthRouter } from "./health";
+import { authRouter } from "./auth";
+import { usersRouter } from "./users";
+import { verificationRouter } from "./verifications";
+import { listingsRouter } from "./listings";
+import { groupsRouter } from "./groups";
+import { offersRouter } from "./offers";
+import { rentalsRouter } from "./rentals";
+import { conversationsRouter } from "./conversations";
+import { notificationsRouter } from "./notifications";
+import { promotionsRouter } from "./promotions";
+import { paymentsRouter } from "./payments";
+import { adminRouter } from "./admin";
+
+export const apiRouter = Router();
+
+apiRouter.use("/health", healthRouter);
+apiRouter.use("/auth", authRouter);
+apiRouter.use("/users", usersRouter);
+apiRouter.use("/verifications", verificationRouter);
+apiRouter.use("/listings", listingsRouter);
+apiRouter.use("/groups", groupsRouter);
+apiRouter.use("/offers", offersRouter);
+apiRouter.use("/rentals", rentalsRouter);
+apiRouter.use("/conversations", conversationsRouter);
+apiRouter.use("/notifications", notificationsRouter);
+apiRouter.use("/promotions", promotionsRouter);
+apiRouter.use("/payments", paymentsRouter);
+apiRouter.use("/admin", adminRouter);
