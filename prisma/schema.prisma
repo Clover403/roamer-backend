@@ -1,0 +1,779 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// Get a free hosted Postgres database in seconds: `npx create-db`
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum UserRole {
+  USER
+  ADMIN
+}
+
+enum UserStatus {
+  ACTIVE
+  PENDING
+  SUSPENDED
+}
+
+enum IdentityVerificationStatus {
+  UNVERIFIED
+  PENDING
+  APPROVED
+  REJECTED
+  EXPIRED
+}
+
+enum VerificationDocumentType {
+  EMIRATES_ID_FRONT
+  EMIRATES_ID_BACK
+  DRIVING_LICENSE
+  PASSPORT
+  SELFIE
+}
+
+enum VerificationType {
+  NONE
+  ROAMER
+  THIRD_PARTY
+}
+
+enum VerificationDecision {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+enum AssetClass {
+  CAR
+  TRUCK
+  BIKE
+  PLATE
+  PART
+}
+
+enum ListingCategory {
+  CARS
+  TRUCKS
+  BIKES
+  PARTS
+  PLATES
+}
+
+enum ListingType {
+  SELL
+  RENT
+}
+
+enum ListingStatus {
+  DRAFT
+  ACTIVE
+  PAUSED
+  SOLD
+  EXPIRED
+  ARCHIVED
+}
+
+enum AssetCondition {
+  NEW
+  USED
+}
+
+enum AvailabilityStatus {
+  AVAILABLE
+  BOOKED
+  UNAVAILABLE
+}
+
+enum ListingMediaType {
+  COVER_IMAGE
+  GALLERY_IMAGE
+  PHOTO
+  GARAGE_360
+  GARAGE_VIDEO
+  GARAGE_PHOTO
+  DOCUMENT_MULKIYA
+  DOCUMENT_INSPECTION
+}
+
+enum GroupStatus {
+  FORMING
+  ACTIVE
+  COMPLETED
+  CANCELLED
+}
+
+enum GroupMemberRole {
+  ADMIN
+  MEMBER
+}
+
+enum GroupInvitationStatus {
+  PENDING
+  ACCEPTED
+  DECLINED
+  EXPIRED
+}
+
+enum OfferStatus {
+  DRAFT
+  PENDING_MEMBER_APPROVAL
+  PENDING_SELLER_REVIEW
+  ACCEPTED
+  REJECTED
+  EXPIRED
+}
+
+enum OfferMemberDecision {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+enum ContractType {
+  PURCHASE
+  RENTAL
+}
+
+enum ContractStatus {
+  DRAFT
+  PENDING_SIGNATURE
+  ACTIVE
+  COMPLETED
+  TERMINATED
+  CANCELLED
+}
+
+enum SignatureStatus {
+  PENDING
+  SIGNED
+  DECLINED
+}
+
+enum RentalStatus {
+  REQUESTED
+  APPROVED
+  REJECTED
+  ACTIVE
+  COMPLETED
+  CANCELLED
+  EXPIRED
+}
+
+enum RentalDurationUnit {
+  DAY
+  WEEK
+  MONTH
+  YEAR
+}
+
+enum PaymentStatus {
+  PENDING
+  PAID
+  FAILED
+  REFUNDED
+  PARTIALLY_REFUNDED
+}
+
+enum PaymentPurpose {
+  RENTAL
+  LISTING_FEE
+  COMMISSION
+  PROMOTION
+  SECURITY_DEPOSIT
+}
+
+enum PromotionStatus {
+  DRAFT
+  PENDING_PAYMENT
+  ACTIVE
+  EXPIRED
+  CANCELLED
+}
+
+enum PromotionSlotChoice {
+  WAITLIST
+  LATER
+}
+
+enum MessageChannelType {
+  GROUP
+  DIRECT
+  SUPPORT
+}
+
+enum MessageType {
+  TEXT
+  IMAGE
+  FILE
+  SYSTEM
+}
+
+enum NotificationType {
+  LISTING
+  GROUP
+  OFFER
+  SYSTEM
+  MESSAGE
+  RENTAL
+  VERIFICATION
+  PROMOTION
+}
+
+enum NotificationPriority {
+  LOW
+  NORMAL
+  HIGH
+  URGENT
+}
+
+enum GarageAssetType {
+  SAVED
+  OWNED
+  RENTED
+}
+
+enum AnalyticsEventType {
+  LISTING_VIEW
+  LISTING_SAVE
+  LISTING_INQUIRY
+  GROUP_CREATED
+  OFFER_SUBMITTED
+  OFFER_ACCEPTED
+  RENTAL_REQUESTED
+  RENTAL_CONFIRMED
+  CHAT_MESSAGE
+  PROMOTION_PURCHASED
+  USER_VERIFIED
+}
+
+model User {
+  id                 String                     @id @default(cuid())
+  email              String                     @unique
+  passwordHash       String?
+  fullName           String
+  phone              String?
+  avatarUrl          String?
+  role               UserRole                   @default(USER)
+  status             UserStatus                 @default(ACTIVE)
+  preferredLanguage  String                     @default("en")
+  isDarkMode         Boolean                    @default(false)
+  isEmailVerified    Boolean                    @default(false)
+  isPhoneVerified    Boolean                    @default(false)
+  verificationStatus IdentityVerificationStatus @default(UNVERIFIED)
+  createdAt          DateTime                   @default(now())
+  updatedAt          DateTime                   @updatedAt
+
+  identityProfile            UserIdentityProfile?
+  verificationSubmissions    VerificationSubmission[]
+  ownedListings              Listing[]                @relation("ListingSeller")
+  createdGroups              Group[]                  @relation("GroupCreator")
+  groupMemberships           GroupMember[]
+  groupInvitations           GroupInvitation[]        @relation("InvitationRecipient")
+  sentMessages               Message[]                @relation("MessageSender")
+  conversationParticipations ConversationParticipant[]
+  notifications              Notification[]
+  rentals                    RentalBooking[]          @relation("RentalRenter")
+  contractsSigned            ContractSignature[]
+  payments                   Payment[]                @relation("PaymentPayer")
+  promotions                 PromotionCampaign[]      @relation("PromotionCreator")
+  garageAssets               GarageAsset[]
+  analyticsEvents            AnalyticsEvent[]
+}
+
+model UserIdentityProfile {
+  id                   String                     @id @default(cuid())
+  userId               String                     @unique
+  dateOfBirth          DateTime?
+  nationality          String?
+  emiratesIdNumber     String?
+  emiratesIdExpiry     DateTime?
+  drivingLicenseNo     String?
+  drivingLicenseExpiry DateTime?
+  passportNumber       String?
+  passportExpiry       DateTime?
+  addressLine          String?
+  city                 String?
+  country              String?                    @default("UAE")
+  verificationStatus   IdentityVerificationStatus @default(UNVERIFIED)
+  verifiedAt           DateTime?
+  createdAt            DateTime                   @default(now())
+  updatedAt            DateTime                   @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model VerificationSubmission {
+  id            String               @id @default(cuid())
+  userId        String
+  status        VerificationDecision @default(PENDING)
+  reviewerNotes String?
+  submittedAt   DateTime             @default(now())
+  reviewedAt    DateTime?
+  createdAt     DateTime             @default(now())
+  updatedAt     DateTime             @updatedAt
+
+  user      User                   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  documents VerificationDocument[]
+}
+
+model VerificationDocument {
+  id            String                   @id @default(cuid())
+  submissionId  String
+  documentType  VerificationDocumentType
+  fileUrl       String
+  mimeType      String?
+  fileSizeBytes Int?
+  createdAt     DateTime                 @default(now())
+
+  submission VerificationSubmission @relation(fields: [submissionId], references: [id], onDelete: Cascade)
+}
+
+model Listing {
+  id                     String             @id @default(cuid())
+  sellerId               String
+  assetClass             AssetClass
+  category               ListingCategory
+  listingType            ListingType
+  status                 ListingStatus      @default(DRAFT)
+  verificationType       VerificationType   @default(NONE)
+  verificationLevel      VerificationType   @default(NONE)
+  availabilityStatus     AvailabilityStatus @default(AVAILABLE)
+
+  title                  String?
+  make                   String?
+  model                  String?
+  year                   Int?
+  description            String?
+
+  condition              AssetCondition?
+  bodyType               String?
+  mileageKm              Int?
+  locationArea           String?
+  locationCity           String?            @default("Dubai")
+  locationCountry        String?            @default("UAE")
+
+  engine                 String?
+  engineShape            String?
+  engineCylinders        Int?
+  engineDisplacementCc   Int?
+  forcedInduction        String?
+  transmission           String?
+  fuelType               String?
+  horsepower             Int?
+  torqueNm               Int?
+  accelerationZeroTo100  String?
+  quarterMile            String?
+  topSpeedKph            Int?
+  driveType              String?
+  regionSpec             String?
+  exteriorColor          String?
+  interiorColor          String?
+  seatingCapacity        Int?
+  warranty               String?
+  vin                    String?
+
+  truckPayloadKg         Int?
+  truckTowingCapacityKg  Int?
+  truckDriveType         String?
+
+  bikeType               String?
+  bikeTransmission       String?
+
+  plateCode              String?
+  plateNumber            String?
+  plateEmirate           String?
+  plateCategory          String?
+
+  partName               String?
+  partCategory           String?
+  partBrand              String?
+  partCompatibility      String?
+  partSku                String?
+
+  priceSellAed           Decimal?           @db.Decimal(14, 2)
+  rentPriceDayAed        Decimal?           @db.Decimal(14, 2)
+  rentPriceWeekAed       Decimal?           @db.Decimal(14, 2)
+  rentPriceMonthAed      Decimal?           @db.Decimal(14, 2)
+  rentPriceYearAed       Decimal?           @db.Decimal(14, 2)
+  rentMinDurationDays    Int?
+  rentSecurityDepositAed Decimal?           @db.Decimal(14, 2)
+
+  paymentModel           String?
+  commissionRatePct      Decimal?           @db.Decimal(5, 2)
+  listingFeeAed          Decimal?           @db.Decimal(10, 2)
+
+  enableGrouping         Boolean            @default(true)
+  inspectorName          String?
+  inspectorCompany       String?
+  responseRatePercent    Int?
+  dealerName             String?
+  dealerLogoUrl          String?
+  groupsActive           Int                @default(0)
+  viewsCount             Int                @default(0)
+  savesCount             Int                @default(0)
+
+  publishedAt            DateTime?
+  soldAt                 DateTime?
+  createdAt              DateTime           @default(now())
+  updatedAt              DateTime           @updatedAt
+
+  seller          User                    @relation("ListingSeller", fields: [sellerId], references: [id], onDelete: Cascade)
+  media           ListingMedia[]
+  maintenanceLogs ListingMaintenanceLog[]
+  groups          Group[]
+  offers          JointOffer[]
+  conversations   Conversation[]
+  rentals         RentalBooking[]
+  contracts       Contract[]
+  promotions      PromotionCampaign[]
+  garageAssets    GarageAsset[]
+  analyticsEvents AnalyticsEvent[]
+
+  @@index([sellerId, status])
+  @@index([category, listingType, status])
+}
+
+model ListingMedia {
+  id            String           @id @default(cuid())
+  listingId     String
+  mediaType     ListingMediaType
+  url           String
+  sortOrder     Int              @default(0)
+  mimeType      String?
+  fileSizeBytes Int?
+  metadata      Json?
+  createdAt     DateTime         @default(now())
+
+  listing Listing @relation(fields: [listingId], references: [id], onDelete: Cascade)
+
+  @@index([listingId, mediaType, sortOrder])
+}
+
+model ListingMaintenanceLog {
+  id            String   @id @default(cuid())
+  listingId     String
+  serviceDate   DateTime?
+  serviceKm     Int?
+  serviceCenter String?
+  createdAt     DateTime @default(now())
+
+  listing Listing @relation(fields: [listingId], references: [id], onDelete: Cascade)
+  items   ListingMaintenanceItem[]
+}
+
+model ListingMaintenanceItem {
+  id        String @id @default(cuid())
+  logId     String
+  text      String
+  sortOrder Int    @default(0)
+
+  log ListingMaintenanceLog @relation(fields: [logId], references: [id], onDelete: Cascade)
+}
+
+model Group {
+  id             String      @id @default(cuid())
+  listingId      String
+  creatorId      String
+  name           String
+  targetPriceAed Decimal     @db.Decimal(14, 2)
+  maxMembers     Int
+  isPublic       Boolean     @default(true)
+  status         GroupStatus @default(FORMING)
+  description    String?
+  createdAt      DateTime    @default(now())
+  updatedAt      DateTime    @updatedAt
+
+  listing       Listing         @relation(fields: [listingId], references: [id], onDelete: Cascade)
+  creator       User            @relation("GroupCreator", fields: [creatorId], references: [id], onDelete: Cascade)
+  members       GroupMember[]
+  invitations   GroupInvitation[]
+  offers        JointOffer[]
+  conversations Conversation[]
+  contracts     Contract[]
+
+  @@index([listingId, status])
+}
+
+model GroupMember {
+  id             String          @id @default(cuid())
+  groupId        String
+  userId         String
+  role           GroupMemberRole @default(MEMBER)
+  ownershipShare Decimal         @db.Decimal(5, 2)
+  isConfirmed    Boolean         @default(false)
+  joinedAt       DateTime        @default(now())
+
+  group Group @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([groupId, userId])
+}
+
+model GroupInvitation {
+  id            String                @id @default(cuid())
+  groupId       String
+  invitedUserId String
+  invitedById   String
+  status        GroupInvitationStatus @default(PENDING)
+  expiresAt     DateTime?
+  createdAt     DateTime              @default(now())
+
+  group       Group @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  invitedUser User  @relation("InvitationRecipient", fields: [invitedUserId], references: [id], onDelete: Cascade)
+
+  @@index([groupId, status])
+}
+
+model JointOffer {
+  id                  String      @id @default(cuid())
+  groupId             String
+  listingId           String
+  createdById         String
+  status              OfferStatus @default(DRAFT)
+  offerPriceAed       Decimal     @db.Decimal(14, 2)
+  downPaymentAed      Decimal?    @db.Decimal(14, 2)
+  savingsAed          Decimal?    @db.Decimal(14, 2)
+  expiryDate          DateTime?
+  termsMessage        String?
+  submittedToSellerAt DateTime?
+  createdAt           DateTime    @default(now())
+  updatedAt           DateTime    @updatedAt
+
+  group        Group               @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  listing      Listing             @relation(fields: [listingId], references: [id], onDelete: Cascade)
+  participants OfferParticipant[]
+  contracts    Contract[]
+  payments     Payment[]
+
+  @@index([groupId, status])
+}
+
+model OfferParticipant {
+  id              String              @id @default(cuid())
+  offerId         String
+  userId          String
+  ownershipShare  Decimal             @db.Decimal(5, 2)
+  contributionAed Decimal             @db.Decimal(14, 2)
+  decision        OfferMemberDecision @default(PENDING)
+  decidedAt       DateTime?
+
+  offer JointOffer @relation(fields: [offerId], references: [id], onDelete: Cascade)
+
+  @@unique([offerId, userId])
+}
+
+model RentalBooking {
+  id                 String             @id @default(cuid())
+  listingId          String
+  renterId           String
+  status             RentalStatus       @default(REQUESTED)
+  durationUnit       RentalDurationUnit
+  durationCount      Int
+  startDate          DateTime
+  endDate            DateTime
+  rateAppliedAed     Decimal            @db.Decimal(14, 2)
+  subtotalAed        Decimal            @db.Decimal(14, 2)
+  securityDepositAed Decimal?           @db.Decimal(14, 2)
+  totalAed           Decimal            @db.Decimal(14, 2)
+  agreedToTerms      Boolean            @default(false)
+  notes              String?
+  approvedAt         DateTime?
+  rejectedAt         DateTime?
+  createdAt          DateTime           @default(now())
+  updatedAt          DateTime           @updatedAt
+
+  listing      Listing       @relation(fields: [listingId], references: [id], onDelete: Cascade)
+  renter       User          @relation("RentalRenter", fields: [renterId], references: [id], onDelete: Cascade)
+  contract     Contract?
+  conversation Conversation?
+  payments     Payment[]
+
+  @@index([listingId, status])
+  @@index([renterId, status])
+}
+
+model Contract {
+  id            String         @id @default(cuid())
+  contractType  ContractType
+  status        ContractStatus @default(DRAFT)
+  listingId     String?
+  groupId       String?
+  offerId       String?
+  rentalId      String?        @unique
+  title         String
+  version       String?
+  documentUrl   String?
+  termsSnapshot Json?
+  startsAt      DateTime?
+  endsAt        DateTime?
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
+
+  listing    Listing?           @relation(fields: [listingId], references: [id], onDelete: SetNull)
+  group      Group?             @relation(fields: [groupId], references: [id], onDelete: SetNull)
+  offer      JointOffer?        @relation(fields: [offerId], references: [id], onDelete: SetNull)
+  rental     RentalBooking?     @relation(fields: [rentalId], references: [id], onDelete: SetNull)
+  signatures ContractSignature[]
+}
+
+model ContractSignature {
+  id         String          @id @default(cuid())
+  contractId String
+  userId     String
+  status     SignatureStatus @default(PENDING)
+  signedAt   DateTime?
+  ipAddress  String?
+
+  contract Contract @relation(fields: [contractId], references: [id], onDelete: Cascade)
+  user     User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([contractId, userId])
+}
+
+model Conversation {
+  id          String             @id @default(cuid())
+  channelType MessageChannelType
+  title       String?
+  listingId   String?
+  groupId     String?
+  rentalId    String?            @unique
+  createdAt   DateTime           @default(now())
+  updatedAt   DateTime           @updatedAt
+
+  listing      Listing?                  @relation(fields: [listingId], references: [id], onDelete: SetNull)
+  group        Group?                    @relation(fields: [groupId], references: [id], onDelete: SetNull)
+  rental       RentalBooking?            @relation(fields: [rentalId], references: [id], onDelete: SetNull)
+  participants ConversationParticipant[]
+  messages     Message[]
+
+  @@index([channelType, updatedAt])
+}
+
+model ConversationParticipant {
+  id             String   @id @default(cuid())
+  conversationId String
+  userId         String
+  lastReadAt     DateTime?
+  joinedAt       DateTime @default(now())
+
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([conversationId, userId])
+}
+
+model Message {
+  id             String      @id @default(cuid())
+  conversationId String
+  senderId       String
+  messageType    MessageType @default(TEXT)
+  content        String
+  attachmentUrl  String?
+  metadata       Json?
+  createdAt      DateTime    @default(now())
+
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  sender       User         @relation("MessageSender", fields: [senderId], references: [id], onDelete: Cascade)
+
+  @@index([conversationId, createdAt])
+}
+
+model Notification {
+  id        String               @id @default(cuid())
+  userId    String
+  type      NotificationType
+  priority  NotificationPriority @default(NORMAL)
+  title     String
+  body      String
+  link      String?
+  isRead    Boolean              @default(false)
+  readAt    DateTime?
+  createdAt DateTime             @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, isRead, createdAt])
+}
+
+model Payment {
+  id                 String        @id @default(cuid())
+  payerId            String
+  purpose            PaymentPurpose
+  status             PaymentStatus @default(PENDING)
+  amountAed          Decimal       @db.Decimal(14, 2)
+  currency           String        @default("AED")
+  provider           String?
+  providerPaymentRef String?
+  rentalId           String?
+  offerId            String?
+  promotionId        String?
+  createdAt          DateTime      @default(now())
+  paidAt             DateTime?
+
+  payer     User               @relation("PaymentPayer", fields: [payerId], references: [id], onDelete: Cascade)
+  rental    RentalBooking?     @relation(fields: [rentalId], references: [id], onDelete: SetNull)
+  offer     JointOffer?        @relation(fields: [offerId], references: [id], onDelete: SetNull)
+  promotion PromotionCampaign? @relation(fields: [promotionId], references: [id], onDelete: SetNull)
+
+  @@index([payerId, status, createdAt])
+}
+
+model PromotionCampaign {
+  id              String              @id @default(cuid())
+  listingId       String
+  createdById     String
+  status          PromotionStatus     @default(DRAFT)
+  packageDays     Int
+  packagePriceAed Decimal             @db.Decimal(14, 2)
+  packageLabel    String?
+  headline        String?
+  subtitle        String?
+  ctaLabel        String?
+  bannerImageUrl  String?
+  slotChoice      PromotionSlotChoice?
+  startsAt        DateTime?
+  endsAt          DateTime?
+  createdAt       DateTime            @default(now())
+  updatedAt       DateTime            @updatedAt
+
+  listing  Listing   @relation(fields: [listingId], references: [id], onDelete: Cascade)
+  creator  User      @relation("PromotionCreator", fields: [createdById], references: [id], onDelete: Cascade)
+  payments Payment[]
+
+  @@index([listingId, status])
+}
+
+model GarageAsset {
+  id        String          @id @default(cuid())
+  userId    String
+  listingId String
+  assetType GarageAssetType @default(SAVED)
+  notes     String?
+  addedAt   DateTime        @default(now())
+
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  listing Listing @relation(fields: [listingId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, listingId, assetType])
+}
+
+model AnalyticsEvent {
+  id          String             @id @default(cuid())
+  eventType   AnalyticsEventType
+  actorUserId String?
+  listingId   String?
+  metadata    Json?
+  createdAt   DateTime           @default(now())
+
+  actor   User?    @relation(fields: [actorUserId], references: [id], onDelete: SetNull)
+  listing Listing? @relation(fields: [listingId], references: [id], onDelete: SetNull)
+
+  @@index([eventType, createdAt])
+}
