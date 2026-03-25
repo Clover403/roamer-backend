@@ -2,6 +2,8 @@ import { Router } from "express";
 import { asyncHandler } from "./utils";
 import {
   createNotification,
+  deleteAllNotificationsByUser,
+  deleteNotificationById,
   listNotificationsByUser,
   markAllNotificationsAsRead,
   markNotificationAsRead,
@@ -27,4 +29,14 @@ notificationsRouter.patch(
 notificationsRouter.patch(
   "/user/:userId/read-all",
   asyncHandler(markAllNotificationsAsRead)
+);
+
+notificationsRouter.delete(
+  "/:id",
+  asyncHandler(deleteNotificationById)
+);
+
+notificationsRouter.delete(
+  "/user/:userId",
+  asyncHandler(deleteAllNotificationsByUser)
 );
