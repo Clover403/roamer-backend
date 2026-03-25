@@ -56,3 +56,15 @@ export const markAllNotificationsAsRead = async (req: Request<{ userId: string }
 
   res.status(200).json(result);
 };
+
+export const deleteNotificationById = async (req: Request<{ id: string }>, res: Response) => {
+  const notificationId = String(req.params.id);
+  await prisma.notification.delete({ where: { id: notificationId } });
+  res.status(204).send();
+};
+
+export const deleteAllNotificationsByUser = async (req: Request<{ userId: string }>, res: Response) => {
+  const userId = String(req.params.userId);
+  const result = await prisma.notification.deleteMany({ where: { userId } });
+  res.status(200).json(result);
+};
