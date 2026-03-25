@@ -30,22 +30,172 @@ const updateIdentitySchema = z.object({
 export const listUsers = async (req: Request, res: Response) => {
   const { skip, limit, page } = parsePagination(req);
   const q = String(req.query.q ?? "").trim();
+  const roleQuery = String(req.query.role ?? "").trim().toUpperCase();
+  const statusQuery = String(req.query.status ?? "").trim().toUpperCase();
 
-  const where = q
-    ? {
-        OR: [
-          { fullName: { contains: q, mode: "insensitive" as const } },
-          { email: { contains: q, mode: "insensitive" as const } },
-        ],
-      }
-    : {};
+  const role = roleQuery === "USER" || roleQuery === "ADMIN" ? roleQuery : undefined;
+  const status =
+    statusQuery === "ACTIVE" || statusQuery === "PENDING" || statusQuery === "SUSPENDED"
+      ? statusQuery
+      : undefined;
+
+  const where: {
+    OR?: Array<{ fullName?: { contains: string; mode: "insensitive" }; email?: { contains: string; mode: "insensitive" } }>;
+    role?: "USER" | "ADMIN";
+    status?: "ACTIVE" | "PENDING" | "SUSPENDED";
+  } = {};
+
+  if (q) {
+    where.OR = [
+      { fullName: { contains: q, mode: "insensitive" } },
+      { email: { contains: q, mode: "insensitive" } },
+    ];
+  }
+
+  if (role) where.role = role;
+  if (status) where.status = status;
 
   const [items, total] = await Promise.all([
-    prisma.user.findMany({ where, skip, take: limit, orderBy: { createdAt: "desc" } }),
+    prisma.user.findMany({
+      where,
+      skip,
+      take: limit,
+      orderBy: { createdAt: "desc" },
+      select: {
+        id: true,
+        email: true,
+        fullName: true,
+        avatarUrl: true,
+        role: true,
+        status: true,
+        verificationStatus: true,
+        createdAt: true,
+        verificationSubmissions: {
+          orderBy: {
+            submittedAt: "desc",
+          },
+          take: 1,
+          select: {
+            id: true,
+            status: true,
+            reviewerNotes: true,
+            submittedAt: true,
+            reviewedAt: true,
+            documents: {
+              select: {
+                id: true,
+                documentType: true,
+                fileUrl: true,
+                createdAt: true,
+              },
+            },
+          },
+        },
+        _count: {
+          select: {
+            ownedListings: true,
+          },
+        },
+      },
+    }),
     prisma.user.count({ where }),
   ]);
 
   res.status(200).json({ items, page, limit, total });
+};
+
+export const getSellerCommissionInvoices = async (req: Request<{ id: string }>, res: Response) => {
+  const sellerId = String(req.params.id);
+
+  const offers = await prisma.jointOffer.findMany({
+    where: {
+      status: "ACCEPTED",
+      listing: {
+        sellerId,
+        paymentModel: {
+          in: ["commission", "hybrid"],
+        },
+      },
+    },
+    include: {
+      listing: {
+        select: {
+          id: true,
+          make: true,
+          model: true,
+          year: true,
+          paymentModel: true,
+          commissionRatePct: true,
+          sellerId: true,
+        },
+      },
+      payments: {
+        where: {
+          purpose: "COMMISSION",
+        },
+        select: {
+          id: true,
+          status: true,
+          amountAed: true,
+          paidAt: true,
+          createdAt: true,
+          providerPaymentRef: true,
+        },
+        orderBy: {
+          createdAt: "desc",
+        },
+      },
+    },
+    orderBy: {
+      updatedAt: "desc",
+    },
+  });
+
+  const invoices = offers.map((offer: (typeof offers)[number]) => {
+    const saleAmountAed = Number(offer.offerPriceAed ?? 0);
+    const commissionRatePct = Number(offer.listing.commissionRatePct ?? 0);
+    const expectedCommissionAed = Number(((saleAmountAed * commissionRatePct) / 100).toFixed(2));
+    const paidPayment = offer.payments.find((payment: (typeof offer.payments)[number]) => payment.status === "PAID");
+
+    return {
+      invoiceId: offer.id,
+      offerId: offer.id,
+      listingId: offer.listing.id,
+      listingTitle: [offer.listing.make, offer.listing.model, offer.listing.year ? String(offer.listing.year) : null]
+        .filter(Boolean)
+        .join(" ") || "Listing",
+      paymentModel: offer.listing.paymentModel,
+      saleAmountAed,
+      commissionRatePct,
+      expectedCommissionAed,
+      status: paidPayment ? "PAID" : "UNPAID",
+      paidAmountAed: paidPayment ? Number(paidPayment.amountAed) : 0,
+      paidAt: paidPayment?.paidAt?.toISOString() ?? null,
+      paymentReference: paidPayment?.providerPaymentRef ?? null,
+      createdAt: offer.createdAt.toISOString(),
+      updatedAt: offer.updatedAt.toISOString(),
+      contactLink: "/my-groups?tab=personals",
+    };
+  });
+
+  res.status(200).json({
+    items: invoices,
+    summary: {
+      total: invoices.length,
+      paid: invoices.filter((item: (typeof invoices)[number]) => item.status === "PAID").length,
+      unpaid: invoices.filter((item: (typeof invoices)[number]) => item.status === "UNPAID").length,
+      expectedCommissionAed: Number(
+        invoices
+          .reduce((acc: number, item: (typeof invoices)[number]) => acc + item.expectedCommissionAed, 0)
+          .toFixed(2)
+      ),
+      paidCommissionAed: Number(
+        invoices
+          .reduce((acc: number, item: (typeof invoices)[number]) => acc + item.paidAmountAed, 0)
+          .toFixed(2)
+      ),
+    },
+  });
 };
 
 export const getUserById = async (req: Request<{ id: string }>, res: Response) => {
@@ -120,6 +270,7 @@ export const getSellerDashboardOverview = async (req: Request<{ id: string }>, r
     recentRentals,
     recentOffers,
     unreadConversations,
+    unreadNotifications,
     sellerRevenue,
   ] = await Promise.all([
     prisma.listing.count({ where: { sellerId } }),
@@ -131,13 +282,13 @@ export const getSellerDashboardOverview = async (req: Request<{ id: string }>, r
     prisma.jointOffer.count({ where: { listing: { sellerId }, status: "PENDING_SELLER_REVIEW" } }),
     prisma.rentalBooking.findMany({
       where: { listing: { sellerId } },
-      take: 5,
+      take: 20,
       orderBy: { createdAt: "desc" },
       include: { renter: true, listing: true },
     }),
     prisma.jointOffer.findMany({
       where: { listing: { sellerId } },
-      take: 5,
+        take: 20,
       orderBy: { createdAt: "desc" },
       include: { listing: true, participants: true, group: true },
     }),
@@ -156,6 +307,12 @@ export const getSellerDashboardOverview = async (req: Request<{ id: string }>, r
         },
       },
     }),
+      prisma.notification.count({
+        where: {
+          userId: sellerId,
+          isRead: false,
+        },
+      }),
     prisma.payment.aggregate({
       where: {
         status: "PAID",
@@ -199,6 +356,7 @@ export const getSellerDashboardOverview = async (req: Request<{ id: string }>, r
       groupsActive,
       offerPendingSellerReview,
       unreadConversations,
+        unreadNotifications,
       activityDeltaPct,
       revenueAed: sellerRevenue._sum.amountAed ?? 0,
     },
