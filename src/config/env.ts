@@ -12,11 +12,26 @@ const toPositiveNumber = (value: string | undefined, fallback: number): number =
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 };
 
+const toOrigins = (value: string | undefined, fallback: string[]): string[] => {
+  if (!value) return fallback;
+
+  const origins = value
+    .split(",")
+    .map((origin) => origin.trim())
+    .filter(Boolean);
+
+  return origins.length > 0 ? origins : fallback;
+};
+
 export const env = {
   NODE_ENV: process.env.NODE_ENV ?? "development",
   PORT: toNumber(process.env.PORT, 4000),
   DATABASE_URL: process.env.DATABASE_URL ?? "",
   CORS_ORIGIN: process.env.CORS_ORIGIN ?? "http://localhost:5173",
+  CORS_ORIGINS: toOrigins(
+    process.env.CORS_ORIGINS ?? process.env.CORS_ORIGIN,
+    ["http://localhost:5173", "http://127.0.0.1:5173", "https://*.vercel.app"]
+  ),
   JWT_SECRET: process.env.JWT_SECRET ?? "",
   JWT_EXPIRES_IN: process.env.JWT_EXPIRES_IN ?? "7d",
   JWT_COOKIE_NAME: process.env.JWT_COOKIE_NAME ?? "roamer_access_token",
