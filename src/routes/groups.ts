@@ -1,11 +1,15 @@
 import { Router } from "express";
 import { asyncHandler } from "./utils";
+import { requireAuth } from "../middlewares/auth";
 import {
   addGroupMember,
+  confirmGroupMemberTerms,
   createGroup,
   createGroupInvitation,
+  deleteGroup,
   getGroupById,
   listGroups,
+  removeGroupMember,
   updateInvitationStatus,
 } from "../controllers/groups.controller";
 
@@ -18,6 +22,7 @@ groupsRouter.get(
 
 groupsRouter.post(
   "/",
+  requireAuth,
   asyncHandler(createGroup)
 );
 
@@ -29,6 +34,21 @@ groupsRouter.get(
 groupsRouter.post(
   "/:id/members",
   asyncHandler(addGroupMember)
+);
+
+groupsRouter.patch(
+  "/:id/members/:userId/confirm",
+  asyncHandler(confirmGroupMemberTerms)
+);
+
+groupsRouter.delete(
+  "/:id/members/:userId",
+  asyncHandler(removeGroupMember)
+);
+
+groupsRouter.delete(
+  "/:id",
+  asyncHandler(deleteGroup)
 );
 
 groupsRouter.post(
