@@ -10,8 +10,10 @@ import { rentalsRouter } from "./rentals";
 import { conversationsRouter } from "./conversations";
 import { notificationsRouter } from "./notifications";
 import { promotionsRouter } from "./promotions";
+import { adsRouter } from "./ads";
 import { paymentsRouter } from "./payments";
 import { adminRouter } from "./admin";
+import { garageRouter } from "./garage";
 
 export const apiRouter = Router();
 
@@ -26,5 +28,7 @@ apiRouter.use("/rentals", rentalsRouter);
 apiRouter.use("/conversations", conversationsRouter);
 apiRouter.use("/notifications", notificationsRouter);
 apiRouter.use("/promotions", promotionsRouter);
+apiRouter.use("/ads", adsRouter);
 apiRouter.use("/payments", paymentsRouter);
 apiRouter.use("/admin", adminRouter);
+apiRouter.use("/garage", garageRouter);
