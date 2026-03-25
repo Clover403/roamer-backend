@@ -5,6 +5,21 @@ import { prisma } from "../lib/prisma";
 import { clearAuthCookie, setAuthCookie, signAuthToken, verifyAuthToken } from "../lib/auth";
 import { env } from "../config/env";
 
+const toAuthUser = <T extends {
+  id: string;
+  email: string;
+  fullName: string;
+  role: "USER" | "ADMIN";
+  verificationStatus: "UNVERIFIED" | "PENDING" | "APPROVED" | "REJECTED" | "EXPIRED";
+}>(user: T, rejectionReason?: string | null) => ({
+  id: user.id,
+  email: user.email,
+  fullName: user.fullName,
+  role: user.role,
+  verificationStatus: user.verificationStatus,
+  verificationRejectionReason: rejectionReason ?? null,
+});
+
 const registerSchema = z.object({
   email: z.string().email(),
   fullName: z.string().min(2),
@@ -18,7 +33,13 @@ const loginSchema = z.object({
 });
 
 export const register = async (req: Request, res: Response) => {
-  const payload = registerSchema.parse(req.body);
+  const rawPayload = registerSchema.parse(req.body);
+  const payload = {
+    ...rawPayload,
+    email: rawPayload.email.trim().toLowerCase(),
+    fullName: rawPayload.fullName.trim(),
+    phone: rawPayload.phone?.trim(),
+  };
 
   const existing = await prisma.user.findUnique({ where: { email: payload.email } });
 
@@ -48,12 +69,16 @@ export const register = async (req: Request, res: Response) => {
 
   res.status(201).json({
     message: "Registration successful",
-    user,
+    user: toAuthUser(user),
   });
 };
 
 export const login = async (req: Request, res: Response) => {
-  const payload = loginSchema.parse(req.body);
+  const rawPayload = loginSchema.parse(req.body);
+  const payload = {
+    ...rawPayload,
+    email: rawPayload.email.trim().toLowerCase(),
+  };
 
   const user = await prisma.user.findUnique({ where: { email: payload.email } });
 
@@ -79,7 +104,7 @@ export const login = async (req: Request, res: Response) => {
 
   res.status(200).json({
     message: "Login successful",
-    user,
+    user: toAuthUser(user),
   });
 };
 
@@ -106,6 +131,16 @@ export const me = async (req: Request, res: Response) => {
     where: { id: userId },
     include: {
       identityProfile: true,
+      verificationSubmissions: {
+        orderBy: {
+          submittedAt: "desc",
+        },
+        take: 1,
+        select: {
+          status: true,
+          reviewerNotes: true,
+        },
+      },
     },
   });
 
@@ -114,7 +149,12 @@ export const me = async (req: Request, res: Response) => {
     return;
   }
 
-  res.status(200).json({ user });
+  const rejectionReason =
+    user.verificationStatus === "REJECTED"
+      ? user.verificationSubmissions[0]?.reviewerNotes ?? null
+      : null;
+
+  res.status(200).json({ user: toAuthUser(user, rejectionReason) });
 };
 
 export const logout = async (_req: Request, res: Response) => {
