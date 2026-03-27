@@ -10,6 +10,7 @@ export const getUserVerificationGate = async (userId: string): Promise<Verificat
   const user = await prisma.user.findUnique({
     where: { id: userId },
     select: {
+      role: true,
       verificationStatus: true,
       verificationSubmissions: {
         where: {
@@ -33,6 +34,14 @@ export const getUserVerificationGate = async (userId: string): Promise<Verificat
     return {
       allowed: false,
       status: "UNVERIFIED",
+      rejectionReason: null,
+    };
+  }
+
+  if (user.role === "ADMIN") {
+    return {
+      allowed: true,
+      status: "APPROVED",
       rejectionReason: null,
     };
   }

@@ -291,7 +291,7 @@ export const updateOffer = async (req: Request<{ id: string }>, res: Response) =
     });
 
     if (!existingContract) {
-      await prisma.contract.create({
+      const contract = await prisma.contract.create({
         data: {
           contractType: "PURCHASE",
           status: "ACTIVE",
@@ -300,6 +300,34 @@ export const updateOffer = async (req: Request<{ id: string }>, res: Response) =
           offerId: offer.id,
           title: "Joint Purchase Contract",
           startsAt: new Date(),
+        },
+      });
+
+      const signatureUserIds = [
+        existingOffer.listing.sellerId,
+        ...acceptedParticipants.map((participant: { userId: string }) => participant.userId),
+      ];
+
+      const uniqueSignatureUserIds = [...new Set(signatureUserIds)];
+      if (uniqueSignatureUserIds.length > 0) {
+        await prisma.contractSignature.createMany({
+          data: uniqueSignatureUserIds.map((userId: string) => ({
+            contractId: contract.id,
+            userId,
+            status: "PENDING" as const,
+          })),
+          skipDuplicates: true,
+        });
+      }
+
+      await prisma.notification.create({
+        data: {
+          userId: existingOffer.listing.sellerId,
+          type: "SYSTEM",
+          priority: "HIGH",
+          title: "Sales contract generated",
+          body: "Offer approved. Contract has been generated and is ready for seller review.",
+          link: "/seller-activity",
         },
       });
     }
@@ -335,6 +363,29 @@ export const updateOffer = async (req: Request<{ id: string }>, res: Response) =
         .filter(Boolean)
         .join(" ") || "your listing";
 
+      const existingCommissionPayment = await prisma.payment.findFirst({
+        where: {
+          offerId: acceptedOfferWithListing.id,
+          purpose: "COMMISSION",
+        },
+        orderBy: { createdAt: "desc" },
+      });
+
+      if (!existingCommissionPayment) {
+        await prisma.payment.create({
+          data: {
+            payerId: acceptedOfferWithListing.listing.sellerId,
+            purpose: "COMMISSION",
+            status: "PENDING",
+            amountAed: estimatedCommissionAed,
+            currency: "AED",
+            provider: "MANUAL_ADMIN_REVIEW",
+            providerPaymentRef: `OFFER:${acceptedOfferWithListing.id}:COMMISSION`,
+            offerId: acceptedOfferWithListing.id,
+          },
+        });
+      }
+
       await prisma.notification.create({
         data: {
           userId: acceptedOfferWithListing.listing.sellerId,
@@ -364,6 +415,19 @@ export const updateOffer = async (req: Request<{ id: string }>, res: Response) =
         });
       }
     }
+
+    await prisma.analyticsEvent.create({
+      data: {
+        eventType: "OFFER_ACCEPTED",
+        actorUserId: payload.actorUserId,
+        listingId: existingOffer.listingId,
+        metadata: {
+          activityType: "BUYING_COMPLETED",
+          offerId: offer.id,
+          groupId: existingOffer.groupId,
+        },
+      },
+    });
   }
 
   if (payload.status === "REJECTED" && existingOffer.status !== "REJECTED") {

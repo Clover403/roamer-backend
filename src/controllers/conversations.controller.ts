@@ -2,6 +2,7 @@ import type { Request, Response } from "express";
 import type { Prisma } from "@prisma/client";
 import { z } from "zod";
 import { prisma } from "../lib/prisma";
+import { sanitizePlainText } from "../lib/security";
 
 const listConversationQuerySchema = z.object({
   userId: z.string().optional(),
@@ -12,6 +13,30 @@ const listConversationQuerySchema = z.object({
 
 const normalizedSet = (ids: string[]) =>
   Array.from(new Set(ids.filter(Boolean))).sort((a, b) => a.localeCompare(b));
+
+const dedupeGroupConversations = <T extends { id: string; channelType: string; groupId?: string | null; updatedAt: Date }>(
+  items: T[]
+) => {
+  const byGroupId = new Map<string, T>();
+  const nonGroup: T[] = [];
+
+  for (const item of items) {
+    if (item.channelType !== "GROUP") {
+      nonGroup.push(item);
+      continue;
+    }
+
+    if (!item.groupId) continue;
+    const existing = byGroupId.get(item.groupId);
+    if (!existing || new Date(item.updatedAt).getTime() > new Date(existing.updatedAt).getTime()) {
+      byGroupId.set(item.groupId, item);
+    }
+  }
+
+  return [...nonGroup, ...Array.from(byGroupId.values())].sort(
+    (a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime()
+  );
+};
 
 export const listConversations = async (req: Request, res: Response) => {
   const query = listConversationQuerySchema.parse(req.query);
@@ -52,6 +77,7 @@ export const listConversations = async (req: Request, res: Response) => {
           id: true,
           listingId: true,
           name: true,
+          description: true,
         },
       },
       messages: {
@@ -77,14 +103,14 @@ export const listConversations = async (req: Request, res: Response) => {
     return Boolean(item.groupId && item.group);
   });
 
-  res.status(200).json(normalizedItems);
+  res.status(200).json(dedupeGroupConversations(normalizedItems));
 };
 
 export const createConversation = async (req: Request, res: Response) => {
   const payload = z
     .object({
       channelType: z.enum(["GROUP", "DIRECT", "SUPPORT"]),
-      title: z.string().optional(),
+      title: z.string().max(200).optional(),
       listingId: z.string().optional(),
       groupId: z.string().optional(),
       rentalId: z.string().optional(),
@@ -93,6 +119,7 @@ export const createConversation = async (req: Request, res: Response) => {
     .parse(req.body);
 
   const participantUserIds = normalizedSet(payload.participantUserIds);
+  const sanitizedTitle = payload.title ? sanitizePlainText(payload.title, 200) : undefined;
 
   if (payload.channelType === "GROUP") {
     if (!payload.groupId) {
@@ -109,11 +136,12 @@ export const createConversation = async (req: Request, res: Response) => {
       finalParticipantIds = normalizedSet(groupMembers.map((member: { userId: string }) => member.userId));
     }
 
-    const existing = await prisma.conversation.findFirst({
+    const existingGroupConversations = await prisma.conversation.findMany({
       where: {
         channelType: "GROUP",
         groupId: payload.groupId,
       },
+      orderBy: { updatedAt: "desc" },
       include: {
         participants: { include: { user: true } },
         messages: { take: 1, orderBy: { createdAt: "desc" }, include: { sender: true } },
@@ -122,7 +150,18 @@ export const createConversation = async (req: Request, res: Response) => {
       },
     });
 
+    const existing = existingGroupConversations[0];
+
     if (existing) {
+      const duplicateIds = existingGroupConversations.slice(1).map((item: { id: string }) => item.id);
+      if (duplicateIds.length > 0) {
+        await prisma.conversation.deleteMany({
+          where: {
+            id: { in: duplicateIds },
+          },
+        });
+      }
+
       if (finalParticipantIds.length > 0) {
         await prisma.conversationParticipant.createMany({
           data: finalParticipantIds.map((userId) => ({
@@ -150,7 +189,7 @@ export const createConversation = async (req: Request, res: Response) => {
     const conversation = await prisma.conversation.create({
       data: {
         channelType: "GROUP",
-        title: payload.title,
+        title: sanitizedTitle,
         groupId: payload.groupId,
         listingId: payload.listingId,
         participants: {
@@ -215,7 +254,7 @@ export const createConversation = async (req: Request, res: Response) => {
   const conversation = await prisma.conversation.create({
     data: {
       channelType: payload.channelType,
-      title: payload.title,
+      title: sanitizedTitle,
       listingId: payload.listingId,
       groupId: payload.groupId,
       rentalId: payload.rentalId,
@@ -251,10 +290,16 @@ export const createConversationMessage = async (req: Request<{ id: string }>, re
     .object({
       senderId: z.string().min(1),
       messageType: z.enum(["TEXT", "IMAGE", "FILE", "SYSTEM"]).optional(),
-      content: z.string().min(1),
+      content: z.string().min(1).max(5000),
       attachmentUrl: z.string().optional(),
     })
     .parse(req.body);
+
+  const content = sanitizePlainText(payload.content, 5000);
+  if (!content) {
+    res.status(400).json({ message: "Message content is required" });
+    return;
+  }
 
   const message = await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
     const created = await tx.message.create({
@@ -262,7 +307,7 @@ export const createConversationMessage = async (req: Request<{ id: string }>, re
         conversationId,
         senderId: payload.senderId,
         messageType: payload.messageType ?? "TEXT",
-        content: payload.content,
+        content,
         attachmentUrl: payload.attachmentUrl,
       },
       include: {
@@ -322,7 +367,7 @@ export const uploadConversationMessageMedia = async (
 ) => {
   const conversationId = String(req.params.id);
   const senderId = String(req.body?.senderId ?? "").trim();
-  const content = String(req.body?.content ?? "").trim();
+  const content = sanitizePlainText(String(req.body?.content ?? ""), 5000);
 
   if (!req.file) {
     res.status(400).json({ message: "No file uploaded" });

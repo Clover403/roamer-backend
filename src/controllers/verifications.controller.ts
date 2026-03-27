@@ -70,6 +70,7 @@ export const getMyVerificationStatus = async (req: Request, res: Response) => {
     where: { id: authUserId },
     select: {
       id: true,
+      role: true,
       verificationStatus: true,
       verificationSubmissions: {
         orderBy: {
@@ -92,7 +93,7 @@ export const getMyVerificationStatus = async (req: Request, res: Response) => {
 
   res.status(200).json({
     userId: user.id,
-    verificationStatus: user.verificationStatus,
+    verificationStatus: user.role === "ADMIN" ? "APPROVED" : user.verificationStatus,
     latestSubmission,
   });
 };
@@ -103,6 +104,16 @@ export const createVerificationSubmission = async (req: Request, res: Response) 
 
   if (!authUserId) {
     res.status(401).json({ message: "Unauthenticated" });
+    return;
+  }
+
+  const actor = await prisma.user.findUnique({
+    where: { id: authUserId },
+    select: { role: true },
+  });
+
+  if (actor?.role === "ADMIN") {
+    res.status(400).json({ message: "Admin accounts are auto-verified and do not require identity submission" });
     return;
   }
 
@@ -201,9 +212,32 @@ export const createVerificationSubmission = async (req: Request, res: Response) 
 
 export const listVerificationSubmissions = async (_req: Request, res: Response) => {
   const items = await prisma.verificationSubmission.findMany({
-    include: {
-      user: true,
-      documents: true,
+    select: {
+      id: true,
+      userId: true,
+      status: true,
+      reviewerNotes: true,
+      submittedAt: true,
+      reviewedAt: true,
+      createdAt: true,
+      updatedAt: true,
+      user: {
+        select: {
+          id: true,
+          fullName: true,
+          email: true,
+        },
+      },
+      documents: {
+        select: {
+          id: true,
+          documentType: true,
+          fileUrl: true,
+          mimeType: true,
+          fileSizeBytes: true,
+          createdAt: true,
+        },
+      },
     },
     orderBy: { submittedAt: "desc" },
   });

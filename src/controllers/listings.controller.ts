@@ -5,6 +5,7 @@ import { ensurePlatformFeeSettings, mapPlatformFeeSettings } from "../lib/platfo
 import { parsePagination } from "../routes/utils";
 import { purgeCancelledGroups } from "../lib/group-lifecycle";
 import { getUserVerificationGate } from "../lib/identity-verification";
+import { sanitizePlainText } from "../lib/security";
 
 type AuthedRequest = Request & {
   authUser?: {
@@ -117,7 +118,6 @@ const mediaSchema = z.object({
     "COVER_IMAGE",
     "GALLERY_IMAGE",
     "PHOTO",
-    "GARAGE_360",
     "GARAGE_VIDEO",
     "GARAGE_PHOTO",
     "DOCUMENT_MULKIYA",
@@ -130,19 +130,32 @@ const mediaSchema = z.object({
 });
 
 const MANUAL_GARAGE_ASSET_NOTES = "Created from Add to Garage";
+const buildListingFeePaymentRef = (listingId: string) => `LISTING:${listingId}:FEE`;
+
+const listListingsQuerySchema = z.object({
+  q: z.string().optional(),
+  sellerId: z.string().optional(),
+  listingType: z.enum(["SELL", "RENT"]).optional(),
+  category: z.enum(["CARS", "TRUCKS", "BIKES", "PARTS", "PLATES"]).optional(),
+  status: z.enum(["DRAFT", "ACTIVE", "PAUSED", "SOLD", "EXPIRED", "ARCHIVED"]).optional(),
+  moderationStatus: z.enum(["PENDING", "APPROVED", "REJECTED"]).optional(),
+  verificationType: z.enum(["NONE", "ROAMER", "THIRD_PARTY"]).optional(),
+  verificationLevel: z.enum(["NONE", "ROAMER", "THIRD_PARTY"]).optional(),
+});
 
 export const listListings = async (req: Request, res: Response) => {
   await purgeCancelledGroups(prisma);
 
   const { skip, limit, page } = parsePagination(req);
-  const q = String(req.query.q ?? "").trim();
-  const sellerId = req.query.sellerId ? String(req.query.sellerId) : undefined;
-  const listingType = req.query.listingType as "SELL" | "RENT" | undefined;
-  const category = req.query.category as "CARS" | "TRUCKS" | "BIKES" | "PARTS" | "PLATES" | undefined;
-  const status = req.query.status as "DRAFT" | "ACTIVE" | "PAUSED" | "SOLD" | "EXPIRED" | "ARCHIVED" | undefined;
-  const moderationStatus = req.query.moderationStatus as "PENDING" | "APPROVED" | "REJECTED" | undefined;
-  const verificationType = req.query.verificationType as "NONE" | "ROAMER" | "THIRD_PARTY" | undefined;
-  const verificationLevel = req.query.verificationLevel as "NONE" | "ROAMER" | "THIRD_PARTY" | undefined;
+  const query = listListingsQuerySchema.parse(req.query);
+  const q = query.q ? sanitizePlainText(query.q, 120) : "";
+  const sellerId = query.sellerId;
+  const listingType = query.listingType;
+  const category = query.category;
+  const status = query.status;
+  const moderationStatus = query.moderationStatus;
+  const verificationType = query.verificationType;
+  const verificationLevel = query.verificationLevel;
 
   const where: any = {
     ...(q
@@ -257,6 +270,11 @@ export const createListing = async (req: Request, res: Response) => {
 
   const sellPriceAed = payload.priceSellAed ?? 0;
   const listingFeeByPct = sellPriceAed > 0 ? Number(((sellPriceAed * feeSettings.listingFeePct) / 100).toFixed(2)) : undefined;
+  const hybridUpfrontPct =
+    feeSettings.hybridListingFeeAed > 0 && feeSettings.hybridListingFeeAed <= 100
+      ? feeSettings.hybridListingFeeAed
+      : feeSettings.listingFeePct;
+  const hybridListingFeeByPct = sellPriceAed > 0 ? Number(((sellPriceAed * hybridUpfrontPct) / 100).toFixed(2)) : undefined;
 
   if (payload.listingType === "RENT") {
     paymentModel = "commission";
@@ -267,7 +285,7 @@ export const createListing = async (req: Request, res: Response) => {
     listingFeeAed = listingFeeByPct;
   } else if (paymentModel === "hybrid") {
     commissionRatePct = feeSettings.hybridCommissionPct;
-    listingFeeAed = feeSettings.hybridListingFeeAed;
+    listingFeeAed = hybridListingFeeByPct;
   } else {
     commissionRatePct = feeSettings.saleCommissionPct;
     listingFeeAed = undefined;
@@ -290,6 +308,37 @@ export const createListing = async (req: Request, res: Response) => {
       publishedAt: null,
     },
   });
+
+  await prisma.analyticsEvent.create({
+    data: {
+      eventType: "LISTING_SAVE",
+      actorUserId: authUserId,
+      listingId: listing.id,
+      metadata: {
+        activityType: "USER_POST_LISTING",
+        listingType: listing.listingType,
+        category: listing.category,
+      },
+    },
+  });
+
+  if (
+    listing.listingType === "SELL" &&
+    (listing.paymentModel === "listing_fee" || listing.paymentModel === "hybrid") &&
+    Number(listing.listingFeeAed ?? 0) > 0
+  ) {
+    await prisma.payment.create({
+      data: {
+        payerId: authUserId,
+        purpose: "LISTING_FEE",
+        status: "PENDING",
+        amountAed: Number(listing.listingFeeAed ?? 0),
+        currency: "AED",
+        provider: "MANUAL_ADMIN_REVIEW",
+        providerPaymentRef: buildListingFeePaymentRef(listing.id),
+      },
+    });
+  }
 
   const admins = await prisma.user.findMany({
     where: { role: "ADMIN" },
@@ -504,6 +553,8 @@ export const adminReviewListingById = async (req: Request<{ id: string }>, res: 
       make: true,
       model: true,
       listingType: true,
+      paymentModel: true,
+      listingFeeAed: true,
     },
   });
 
@@ -517,16 +568,59 @@ export const adminReviewListingById = async (req: Request<{ id: string }>, res: 
     ? `${payload.rejectionArea ? `Ditolak pada bagian: ${payload.rejectionArea}. ` : ""}${payload.reason ?? "Perlu perbaikan pada data listing."}`
     : null;
 
-  const updated = await prisma.listing.update({
-    where: { id: listingId },
-    data: {
-      moderationStatus: payload.decision === "APPROVE" ? "APPROVED" : "REJECTED",
-      moderationReason: rejectionMessage,
-      reviewedById: reviewerId,
-      reviewedAt: now,
-      status: payload.decision === "APPROVE" ? "ACTIVE" : "DRAFT",
-      ...(payload.decision === "APPROVE" ? { publishedAt: now } : {}),
-    },
+  const updated = await prisma.$transaction(async (tx: typeof prisma) => {
+    if (
+      payload.decision === "APPROVE" &&
+      existing.listingType === "SELL" &&
+      (existing.paymentModel === "listing_fee" || existing.paymentModel === "hybrid") &&
+      Number(existing.listingFeeAed ?? 0) > 0
+    ) {
+      const paymentRef = buildListingFeePaymentRef(existing.id);
+      const latestListingFeePayment = await tx.payment.findFirst({
+        where: {
+          payerId: existing.sellerId,
+          purpose: "LISTING_FEE",
+          providerPaymentRef: paymentRef,
+        },
+        orderBy: { createdAt: "desc" },
+      });
+
+      if (!latestListingFeePayment) {
+        await tx.payment.create({
+          data: {
+            payerId: existing.sellerId,
+            purpose: "LISTING_FEE",
+            status: "PAID",
+            amountAed: Number(existing.listingFeeAed ?? 0),
+            currency: "AED",
+            provider: "MANUAL_ADMIN_APPROVED",
+            providerPaymentRef: paymentRef,
+            paidAt: now,
+          },
+        });
+      } else if (latestListingFeePayment.status !== "PAID") {
+        await tx.payment.update({
+          where: { id: latestListingFeePayment.id },
+          data: {
+            status: "PAID",
+            paidAt: now,
+            provider: "MANUAL_ADMIN_APPROVED",
+          },
+        });
+      }
+    }
+
+    return tx.listing.update({
+      where: { id: listingId },
+      data: {
+        moderationStatus: payload.decision === "APPROVE" ? "APPROVED" : "REJECTED",
+        moderationReason: rejectionMessage,
+        reviewedById: reviewerId,
+        reviewedAt: now,
+        status: payload.decision === "APPROVE" ? "ACTIVE" : "DRAFT",
+        ...(payload.decision === "APPROVE" ? { publishedAt: now } : {}),
+      },
+    });
   });
 
   await prisma.notification.create({

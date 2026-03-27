@@ -1,8 +1,40 @@
 import type { Request, Response } from "express";
+import type { Prisma } from "@prisma/client";
 import { z } from "zod";
 import { prisma } from "../lib/prisma";
 import { parsePagination } from "../routes/utils";
 import { buildDayBuckets, getChangePercent, getRangeStart, makeDayKey, parseDashboardRange, rangeToDays } from "./dashboard.utils";
+
+const parsePaymentRefBase = (value?: string | null) => String(value ?? "").split("|")[0] ?? "";
+
+const parseTransferMetaFromPaymentRef = (value?: string | null) => {
+  const raw = String(value ?? "");
+  const parts = raw.split("|").slice(1);
+  const map = new Map<string, string>();
+
+  for (const part of parts) {
+    const [k, ...rest] = part.split("=");
+    if (!k || rest.length === 0) continue;
+    map.set(k, decodeURIComponent(rest.join("=")));
+  }
+
+  return {
+    transferReference: map.get("transferReference") ?? null,
+    transferredAt: map.get("transferredAt") ?? null,
+    note: map.get("note") ?? null,
+  };
+};
+
+const appendTransferMetaToPaymentRef = (
+  baseRef: string,
+  payload: { transferReference?: string; transferredAt?: string; note?: string }
+) => {
+  const suffix: string[] = [];
+  if (payload.transferReference) suffix.push(`transferReference=${encodeURIComponent(payload.transferReference)}`);
+  if (payload.transferredAt) suffix.push(`transferredAt=${encodeURIComponent(payload.transferredAt)}`);
+  if (payload.note) suffix.push(`note=${encodeURIComponent(payload.note)}`);
+  return suffix.length ? `${baseRef}|${suffix.join("|")}` : baseRef;
+};
 
 const updateUserSchema = z.object({
   fullName: z.string().min(2).optional(),
@@ -32,6 +64,7 @@ export const listUsers = async (req: Request, res: Response) => {
   const q = String(req.query.q ?? "").trim();
   const roleQuery = String(req.query.role ?? "").trim().toUpperCase();
   const statusQuery = String(req.query.status ?? "").trim().toUpperCase();
+  const verificationQuery = String(req.query.verificationStatus ?? "").trim().toUpperCase();
 
   const role = roleQuery === "USER" || roleQuery === "ADMIN" ? roleQuery : undefined;
   const status =
@@ -39,10 +72,20 @@ export const listUsers = async (req: Request, res: Response) => {
       ? statusQuery
       : undefined;
 
+  const verificationStatus =
+    verificationQuery === "UNVERIFIED" ||
+    verificationQuery === "PENDING" ||
+    verificationQuery === "APPROVED" ||
+    verificationQuery === "REJECTED" ||
+    verificationQuery === "EXPIRED"
+      ? verificationQuery
+      : undefined;
+
   const where: {
     OR?: Array<{ fullName?: { contains: string; mode: "insensitive" }; email?: { contains: string; mode: "insensitive" } }>;
     role?: "USER" | "ADMIN";
     status?: "ACTIVE" | "PENDING" | "SUSPENDED";
+    verificationStatus?: "UNVERIFIED" | "PENDING" | "APPROVED" | "REJECTED" | "EXPIRED";
   } = {};
 
   if (q) {
@@ -54,6 +97,7 @@ export const listUsers = async (req: Request, res: Response) => {
 
   if (role) where.role = role;
   if (status) where.status = status;
+  if (verificationStatus) where.verificationStatus = verificationStatus;
 
   const [items, total] = await Promise.all([
     prisma.user.findMany({
@@ -107,7 +151,7 @@ export const listUsers = async (req: Request, res: Response) => {
 export const getSellerCommissionInvoices = async (req: Request<{ id: string }>, res: Response) => {
   const sellerId = String(req.params.id);
 
-  const offers = await prisma.jointOffer.findMany({
+  const acceptedCommissionOffers = await prisma.jointOffer.findMany({
     where: {
       status: "ACCEPTED",
       listing: {
@@ -117,16 +161,12 @@ export const getSellerCommissionInvoices = async (req: Request<{ id: string }>, 
         },
       },
     },
-    include: {
+    select: {
+      id: true,
+      offerPriceAed: true,
       listing: {
         select: {
-          id: true,
-          make: true,
-          model: true,
-          year: true,
-          paymentModel: true,
           commissionRatePct: true,
-          sellerId: true,
         },
       },
       payments: {
@@ -135,45 +175,140 @@ export const getSellerCommissionInvoices = async (req: Request<{ id: string }>, 
         },
         select: {
           id: true,
-          status: true,
-          amountAed: true,
-          paidAt: true,
-          createdAt: true,
-          providerPaymentRef: true,
         },
-        orderBy: {
-          createdAt: "desc",
+      },
+    },
+  });
+
+  const missingCommissionPayments = acceptedCommissionOffers.filter(
+    (offer: (typeof acceptedCommissionOffers)[number]) => offer.payments.length === 0
+  );
+
+  for (const offer of missingCommissionPayments) {
+    const saleAmountAed = Number(offer.offerPriceAed ?? 0);
+    const commissionRatePct = Number(offer.listing.commissionRatePct ?? 0);
+    const expectedCommissionAed = Number(((saleAmountAed * commissionRatePct) / 100).toFixed(2));
+
+    if (expectedCommissionAed <= 0) continue;
+
+    await prisma.payment.create({
+      data: {
+        payerId: sellerId,
+        purpose: "COMMISSION",
+        status: "PENDING",
+        amountAed: expectedCommissionAed,
+        currency: "AED",
+        provider: "MANUAL_ADMIN_REVIEW",
+        providerPaymentRef: `OFFER:${offer.id}:COMMISSION`,
+        offerId: offer.id,
+      },
+    });
+  }
+
+  const payments = await prisma.payment.findMany({
+    where: {
+      payerId: sellerId,
+      purpose: {
+        in: ["COMMISSION", "LISTING_FEE"],
+      },
+    },
+    include: {
+      offer: {
+        select: {
+          id: true,
+          offerPriceAed: true,
+          listing: {
+            select: {
+              id: true,
+              make: true,
+              model: true,
+              year: true,
+              paymentModel: true,
+              commissionRatePct: true,
+            },
+          },
         },
       },
     },
     orderBy: {
-      updatedAt: "desc",
+      createdAt: "desc",
     },
   });
 
-  const invoices = offers.map((offer: (typeof offers)[number]) => {
-    const saleAmountAed = Number(offer.offerPriceAed ?? 0);
-    const commissionRatePct = Number(offer.listing.commissionRatePct ?? 0);
-    const expectedCommissionAed = Number(((saleAmountAed * commissionRatePct) / 100).toFixed(2));
-    const paidPayment = offer.payments.find((payment: (typeof offer.payments)[number]) => payment.status === "PAID");
+  const listingIdsFromPaymentRef = Array.from(
+    new Set(
+      payments
+        .map((payment: (typeof payments)[number]) => {
+          if (payment.purpose !== "LISTING_FEE") return null;
+          const ref = parsePaymentRefBase(payment.providerPaymentRef);
+          const match = /^LISTING:([^:|]+):FEE$/i.exec(ref);
+          return match?.[1] ?? null;
+        })
+        .filter(Boolean)
+    )
+  ) as string[];
+
+  const referencedListings = listingIdsFromPaymentRef.length
+    ? await prisma.listing.findMany({
+        where: { id: { in: listingIdsFromPaymentRef }, sellerId },
+        select: {
+          id: true,
+          make: true,
+          model: true,
+          year: true,
+          paymentModel: true,
+          priceSellAed: true,
+        },
+      })
+    : [];
+
+  const listingById = new Map(referencedListings.map((listing: (typeof referencedListings)[number]) => [listing.id, listing]));
+
+  const invoices = payments.map((payment: (typeof payments)[number]) => {
+    const isPaid = payment.status === "PAID";
+    const listingFromOffer = payment.offer?.listing;
+    const listingFromRefId = (() => {
+      const ref = parsePaymentRefBase(payment.providerPaymentRef);
+      const match = /^LISTING:([^:|]+):FEE$/i.exec(ref);
+      return match?.[1] ?? null;
+    })();
+    const listingFromRef = listingFromRefId ? listingById.get(listingFromRefId) : null;
+    const listing = listingFromOffer ?? listingFromRef;
+
+    const listingFromRefPriceAed = Number((listingFromRef as { priceSellAed?: unknown } | null)?.priceSellAed ?? 0);
+    const saleAmountAed = Number(payment.offer?.offerPriceAed ?? listingFromRefPriceAed ?? 0);
+    const commissionRatePct = payment.purpose === "COMMISSION" ? Number(listingFromOffer?.commissionRatePct ?? 0) : 0;
+    const expectedCommissionAed = Number(payment.amountAed ?? 0);
+    const transferMeta = parseTransferMetaFromPaymentRef(payment.providerPaymentRef);
+    const transferStatus =
+      payment.status === "PAID"
+        ? "PAID"
+        : payment.provider === "MANUAL_TRANSFER_SUBMITTED"
+          ? "WAITING_ADMIN"
+          : "NOT_SUBMITTED";
 
     return {
-      invoiceId: offer.id,
-      offerId: offer.id,
-      listingId: offer.listing.id,
-      listingTitle: [offer.listing.make, offer.listing.model, offer.listing.year ? String(offer.listing.year) : null]
+      invoiceId: payment.id,
+      offerId: payment.offerId ?? null,
+      listingId: listing?.id ?? null,
+      listingTitle: [listing?.make, listing?.model, listing?.year ? String(listing.year) : null]
         .filter(Boolean)
         .join(" ") || "Listing",
-      paymentModel: offer.listing.paymentModel,
+      paymentModel: listing?.paymentModel ?? null,
+      invoiceType: payment.purpose,
+      transferStatus,
+      transferReference: transferMeta.transferReference,
+      transferredAt: transferMeta.transferredAt,
+      transferNote: transferMeta.note,
       saleAmountAed,
       commissionRatePct,
       expectedCommissionAed,
-      status: paidPayment ? "PAID" : "UNPAID",
-      paidAmountAed: paidPayment ? Number(paidPayment.amountAed) : 0,
-      paidAt: paidPayment?.paidAt?.toISOString() ?? null,
-      paymentReference: paidPayment?.providerPaymentRef ?? null,
-      createdAt: offer.createdAt.toISOString(),
-      updatedAt: offer.updatedAt.toISOString(),
+      status: isPaid ? "PAID" : "UNPAID",
+      paidAmountAed: isPaid ? Number(payment.amountAed ?? 0) : 0,
+      paidAt: payment.paidAt?.toISOString() ?? null,
+      paymentReference: payment.providerPaymentRef ?? null,
+      createdAt: payment.createdAt.toISOString(),
+      updatedAt: payment.paidAt?.toISOString() ?? payment.createdAt.toISOString(),
       contactLink: "/my-groups?tab=personals",
     };
   });
@@ -198,6 +333,87 @@ export const getSellerCommissionInvoices = async (req: Request<{ id: string }>, 
   });
 };
 
+export const submitSellerFeeInvoiceTransfer = async (req: Request<{ id: string; paymentId: string }>, res: Response) => {
+  const sellerId = String(req.params.id);
+  const paymentId = String(req.params.paymentId);
+  const authUserId = (req as Request & { authUser?: { id: string } }).authUser?.id;
+
+  if (!authUserId || authUserId !== sellerId) {
+    res.status(403).json({ message: "Only authenticated seller can submit transfer" });
+    return;
+  }
+
+  const payload = z
+    .object({
+      transferReference: z.string().trim().min(3).max(120),
+      transferredAt: z.string().datetime(),
+      note: z.string().trim().max(500).optional(),
+    })
+    .parse(req.body);
+
+  const payment = await prisma.payment.findUnique({
+    where: { id: paymentId },
+    select: {
+      id: true,
+      payerId: true,
+      purpose: true,
+      status: true,
+      amountAed: true,
+      providerPaymentRef: true,
+    },
+  });
+
+  if (!payment || payment.payerId !== sellerId) {
+    res.status(404).json({ message: "Fee invoice not found" });
+    return;
+  }
+
+  if (payment.purpose !== "LISTING_FEE" && payment.purpose !== "COMMISSION") {
+    res.status(400).json({ message: "Only LISTING_FEE or COMMISSION invoices are allowed" });
+    return;
+  }
+
+  if (payment.status === "PAID") {
+    res.status(409).json({ message: "Invoice already paid" });
+    return;
+  }
+
+  const baseRef = parsePaymentRefBase(payment.providerPaymentRef) || `PAYMENT:${payment.id}`;
+  const providerPaymentRef = appendTransferMetaToPaymentRef(baseRef, {
+    transferReference: payload.transferReference,
+    transferredAt: payload.transferredAt,
+    note: payload.note,
+  });
+
+  const updated = await prisma.payment.update({
+    where: { id: payment.id },
+    data: {
+      provider: "MANUAL_TRANSFER_SUBMITTED",
+      providerPaymentRef,
+    },
+  });
+
+  const admins = await prisma.user.findMany({
+    where: { role: "ADMIN" },
+    select: { id: true },
+  });
+
+  if (admins.length > 0) {
+    await prisma.notification.createMany({
+      data: admins.map((admin: { id: string }) => ({
+        userId: admin.id,
+        type: "SYSTEM",
+        priority: "HIGH",
+        title: "Fee transfer submitted",
+        body: `Seller submitted transfer for ${payment.purpose} invoice (AED ${Number(payment.amountAed).toFixed(2)}).`,
+        link: "/admin?tab=fee-settings",
+      })),
+    });
+  }
+
+  res.status(200).json(updated);
+};
+
 export const getUserById = async (req: Request<{ id: string }>, res: Response) => {
   const userId = String(req.params.id);
 
@@ -216,13 +432,120 @@ export const getUserById = async (req: Request<{ id: string }>, res: Response) =
   res.status(200).json(user);
 };
 
+export const getAdminUserDetail = async (req: Request<{ id: string }>, res: Response) => {
+  const userId = String(req.params.id);
+
+  const user = await prisma.user.findUnique({
+    where: { id: userId },
+    select: {
+      id: true,
+      fullName: true,
+      email: true,
+      phone: true,
+      role: true,
+      status: true,
+      verificationStatus: true,
+      createdAt: true,
+      verificationSubmissions: {
+        orderBy: {
+          submittedAt: "desc",
+        },
+        take: 1,
+        select: {
+          id: true,
+          status: true,
+          reviewerNotes: true,
+          submittedAt: true,
+          reviewedAt: true,
+          documents: {
+            orderBy: {
+              createdAt: "asc",
+            },
+            select: {
+              id: true,
+              documentType: true,
+              fileUrl: true,
+              mimeType: true,
+              fileSizeBytes: true,
+              createdAt: true,
+            },
+          },
+        },
+      },
+      _count: {
+        select: {
+          ownedListings: true,
+        },
+      },
+    },
+  });
+
+  if (!user) {
+    res.status(404).json({ message: "User not found" });
+    return;
+  }
+
+  const listingTypeCounts = await prisma.listing.groupBy({
+    by: ["listingType"],
+    where: {
+      sellerId: userId,
+    },
+    _count: {
+      _all: true,
+    },
+  });
+
+  const saleListings =
+    listingTypeCounts.find((item: { listingType: "SELL" | "RENT"; _count: { _all: number } }) => item.listingType === "SELL")
+      ?._count._all ?? 0;
+  const rentListings =
+    listingTypeCounts.find((item: { listingType: "SELL" | "RENT"; _count: { _all: number } }) => item.listingType === "RENT")
+      ?._count._all ?? 0;
+
+  res.status(200).json({
+    ...user,
+    listingsSummary: {
+      total: user._count.ownedListings,
+      sale: saleListings,
+      rent: rentListings,
+    },
+    latestVerificationSubmission: user.verificationSubmissions[0] ?? null,
+  });
+};
+
 export const updateUserById = async (req: Request<{ id: string }>, res: Response) => {
   const userId = String(req.params.id);
   const data = updateUserSchema.parse(req.body);
 
-  const user = await prisma.user.update({
-    where: { id: userId },
-    data,
+  const shouldAutoApproveIdentity = data.role === "ADMIN";
+
+  const user = await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
+    const updated = await tx.user.update({
+      where: { id: userId },
+      data: shouldAutoApproveIdentity
+        ? {
+            ...data,
+            verificationStatus: "APPROVED",
+          }
+        : data,
+    });
+
+    if (shouldAutoApproveIdentity) {
+      await tx.userIdentityProfile.upsert({
+        where: { userId },
+        update: {
+          verificationStatus: "APPROVED",
+          verifiedAt: new Date(),
+        },
+        create: {
+          userId,
+          verificationStatus: "APPROVED",
+          verifiedAt: new Date(),
+        },
+      });
+    }
+
+    return updated;
   });
 
   res.status(200).json(user);

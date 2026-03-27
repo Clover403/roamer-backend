@@ -470,6 +470,18 @@ export const sellerDecisionRental = async (req: Request<{ id: string }>, res: Re
 
   await prisma.notification.createMany({ data: notificationRows });
 
+  await prisma.analyticsEvent.create({
+    data: {
+      eventType: "RENTAL_CONFIRMED",
+      actorUserId: payload.sellerId,
+      listingId: rental.listingId,
+      metadata: {
+        activityType: "RENTAL_COMPLETED",
+        rentalId: rental.id,
+      },
+    },
+  });
+
   res.status(200).json(updated);
 };
 

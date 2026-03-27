@@ -3,6 +3,7 @@ import { z } from "zod";
 import { prisma } from "../lib/prisma";
 import { purgeCancelledGroups } from "../lib/group-lifecycle";
 import { getUserVerificationGate } from "../lib/identity-verification";
+import { isSafeHttpUrl, sanitizePlainText } from "../lib/security";
 
 type AuthedRequest = Request & {
   authUser?: {
@@ -14,12 +15,17 @@ type AuthedRequest = Request & {
 const createGroupSchema = z.object({
   listingId: z.string().min(1),
   creatorId: z.string().min(1).optional(),
-  name: z.string().min(2),
+  name: z.string().min(2).max(120),
   targetPriceAed: z.number().positive(),
-  maxMembers: z.number().int().min(2),
+  maxMembers: z.number().int().min(1),
   isPublic: z.boolean().optional(),
-  description: z.string().optional(),
+  description: z.string().max(1000).optional(),
   creatorShare: z.number().min(1).max(100),
+});
+
+const updateGroupProfileImageSchema = z.object({
+  requesterId: z.string().min(1),
+  imageUrl: z.string().trim().min(1),
 });
 
 export const listGroups = async (req: Request, res: Response) => {
@@ -51,7 +57,12 @@ export const createGroup = async (req: Request, res: Response) => {
     return;
   }
 
-  const payload = createGroupSchema.parse(req.body);
+  const rawPayload = createGroupSchema.parse(req.body);
+  const payload = {
+    ...rawPayload,
+    name: sanitizePlainText(rawPayload.name, 120),
+    description: rawPayload.description ? sanitizePlainText(rawPayload.description, 1000) : undefined,
+  };
 
   const verificationGate = await getUserVerificationGate(authUserId);
   if (!verificationGate.allowed) {
@@ -74,7 +85,7 @@ export const createGroup = async (req: Request, res: Response) => {
 
   const listing = await prisma.listing.findUnique({
     where: { id: payload.listingId },
-    select: { id: true, sellerId: true, listingType: true, status: true },
+    select: { id: true, sellerId: true, listingType: true, status: true, priceSellAed: true },
   });
 
   if (!listing) {
@@ -92,10 +103,22 @@ export const createGroup = async (req: Request, res: Response) => {
     return;
   }
 
+  const listingSellPrice = Number(listing.priceSellAed ?? 0);
+  if (listingSellPrice > 0 && payload.targetPriceAed > listingSellPrice) {
+    res.status(400).json({
+      message: "Target offer must be less than or equal to listing sale price",
+    });
+    return;
+  }
+
   if (listing.sellerId === authUserId) {
     res.status(403).json({ message: "You cannot create a purchase group for your own listing" });
     return;
   }
+
+  const normalizedMaxMembers = Math.max(1, payload.maxMembers);
+  const creatorShare = normalizedMaxMembers === 1 ? 100 : payload.creatorShare;
+  const creatorConfirmed = normalizedMaxMembers === 1;
 
   const group = await prisma.group.create({
     data: {
@@ -103,15 +126,15 @@ export const createGroup = async (req: Request, res: Response) => {
       creatorId: authUserId,
       name: payload.name,
       targetPriceAed: payload.targetPriceAed,
-      maxMembers: payload.maxMembers,
+      maxMembers: normalizedMaxMembers,
       isPublic: payload.isPublic ?? true,
       description: payload.description,
       members: {
         create: {
           userId: authUserId,
           role: "ADMIN",
-          ownershipShare: payload.creatorShare,
-          isConfirmed: false,
+          ownershipShare: creatorShare,
+          isConfirmed: creatorConfirmed,
         },
       },
     },
@@ -405,4 +428,68 @@ export const updateInvitationStatus = async (req: Request<{ invitationId: string
   });
 
   res.status(200).json(invitation);
+};
+
+export const uploadGroupProfileImage = async (
+  req: Request & { file?: Express.Multer.File },
+  res: Response
+) => {
+  if (!req.file) {
+    res.status(400).json({ message: "No file uploaded" });
+    return;
+  }
+
+  const host = req.get("host");
+  if (!host) {
+    res.status(400).json({ message: "Unable to determine host" });
+    return;
+  }
+
+  const fileUrl = `${req.protocol}://${host}/uploads/groups/${req.file.filename}`;
+  res.status(201).json({ url: fileUrl });
+};
+
+export const updateGroupProfileImage = async (req: Request<{ id: string }>, res: Response) => {
+  const groupId = String(req.params.id);
+  const payload = updateGroupProfileImageSchema.parse(req.body);
+
+  if (!isSafeHttpUrl(payload.imageUrl)) {
+    res.status(400).json({ message: "Image URL must be a valid http(s) URL" });
+    return;
+  }
+
+  const group = await prisma.group.findUnique({
+    where: { id: groupId },
+    include: {
+      members: {
+        where: { userId: payload.requesterId },
+        select: { role: true },
+      },
+    },
+  });
+
+  if (!group) {
+    res.status(404).json({ message: "Group not found" });
+    return;
+  }
+
+  if (group.status === "CANCELLED" || group.status === "COMPLETED") {
+    res.status(400).json({ message: "This group is no longer active" });
+    return;
+  }
+
+  const requester = group.members[0];
+  if (!requester || requester.role !== "ADMIN") {
+    res.status(403).json({ message: "Only group admin can update group profile image" });
+    return;
+  }
+
+  const updated = await prisma.group.update({
+    where: { id: groupId },
+    data: {
+      description: payload.imageUrl.trim(),
+    },
+  });
+
+  res.status(200).json(updated);
 };
