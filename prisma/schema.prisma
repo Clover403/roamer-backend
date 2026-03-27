@@ -101,7 +101,6 @@ enum ListingMediaType {
   COVER_IMAGE
   GALLERY_IMAGE
   PHOTO
-  GARAGE_360
   GARAGE_VIDEO
   GARAGE_PHOTO
   DOCUMENT_MULKIYA
@@ -296,6 +295,7 @@ model User {
   updatedAt          DateTime                   @updatedAt
 
   identityProfile            UserIdentityProfile?
+  emailVerificationTokens    EmailVerificationToken[]
   verificationSubmissions    VerificationSubmission[]
   ownedListings              Listing[]                @relation("ListingSeller")
   createdGroups              Group[]                  @relation("GroupCreator")
@@ -313,6 +313,23 @@ model User {
   reviewedListings           Listing[]                @relation("ListingReviewer")
   garageAssets               GarageAsset[]
   analyticsEvents            AnalyticsEvent[]
+
+  @@index([role, createdAt])
+  @@index([status, createdAt])
+  @@index([verificationStatus, createdAt])
+}
+
+model EmailVerificationToken {
+  id        String   @id @default(cuid())
+  userId    String
+  tokenHash String   @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, expiresAt])
 }
 
 model UserIdentityProfile {
@@ -349,6 +366,10 @@ model VerificationSubmission {
 
   user      User                   @relation(fields: [userId], references: [id], onDelete: Cascade)
   documents VerificationDocument[]
+
+  @@index([userId, submittedAt])
+  @@index([status, submittedAt])
+  @@index([userId, status])
 }
 
 model VerificationDocument {
@@ -361,6 +382,8 @@ model VerificationDocument {
   createdAt     DateTime                 @default(now())
 
   submission VerificationSubmission @relation(fields: [submissionId], references: [id], onDelete: Cascade)
+
+  @@index([submissionId, documentType])
 }
 
 model Listing {
@@ -471,7 +494,10 @@ model Listing {
   analyticsEvents AnalyticsEvent[]
 
   @@index([sellerId, status])
+  @@index([sellerId, listingType])
   @@index([category, listingType, status])
+  @@index([moderationStatus, createdAt])
+  @@index([verificationType, createdAt])
 }
 
 model ListingMedia {

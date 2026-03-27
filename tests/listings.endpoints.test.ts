@@ -283,4 +283,92 @@ describe("Listings endpoints", () => {
     expect(createPayload.commissionRatePct).toBe(0);
     expect(createPayload.listingFeeAed).toBe(3000);
   });
+
+  it("POST /listings supports all asset classes (car/truck/bike/part/plate)", async () => {
+    const app = createTestApp();
+
+    mockGetUserVerificationGate.mockResolvedValue({ allowed: true, status: "APPROVED", rejectionReason: null });
+    mockPrisma.user.findMany.mockResolvedValue([]);
+    mockPrisma.notification.create.mockResolvedValue({ id: "notif-user-multi" });
+    mockPrisma.listing.create.mockImplementation(async ({ data }: any) => ({
+      id: `listing-${String(data.assetClass).toLowerCase()}`,
+    }));
+
+    const scenarios = [
+      {
+        name: "CAR",
+        payload: {
+          assetClass: "CAR",
+          category: "CARS",
+          listingType: "SELL",
+          make: "BMW",
+          model: "M4",
+          year: 2022,
+          priceSellAed: 320000,
+        },
+      },
+      {
+        name: "TRUCK",
+        payload: {
+          assetClass: "TRUCK",
+          category: "TRUCKS",
+          listingType: "SELL",
+          make: "Ford",
+          model: "Ranger",
+          year: 2021,
+          truckPayloadKg: 1200,
+          priceSellAed: 180000,
+        },
+      },
+      {
+        name: "BIKE",
+        payload: {
+          assetClass: "BIKE",
+          category: "BIKES",
+          listingType: "SELL",
+          make: "Yamaha",
+          model: "R1",
+          year: 2023,
+          bikeType: "Sport",
+          priceSellAed: 95000,
+        },
+      },
+      {
+        name: "PART",
+        payload: {
+          assetClass: "PART",
+          category: "PARTS",
+          listingType: "SELL",
+          partName: "Performance Exhaust",
+          partCategory: "Exhaust",
+          partBrand: "Akrapovic",
+          priceSellAed: 4500,
+        },
+      },
+      {
+        name: "PLATE",
+        payload: {
+          assetClass: "PLATE",
+          category: "PLATES",
+          listingType: "SELL",
+          plateCode: "A",
+          plateNumber: "12345",
+          plateEmirate: "Dubai",
+          priceSellAed: 70000,
+        },
+      },
+    ] as const;
+
+    for (const scenario of scenarios) {
+      const response = await request(app).post("/listings").send(scenario.payload);
+      expect(response.status).toBe(201);
+      expect(response.body.id).toBeTruthy();
+    }
+
+    const createCalls = (mockPrisma.listing.create as any).mock.calls;
+    expect(createCalls).toHaveLength(5);
+
+    const assetClassesSaved = createCalls.map((call: any) => call[0].data.assetClass);
+    expect(assetClassesSaved).toEqual(["CAR", "TRUCK", "BIKE", "PART", "PLATE"]);
+  });
 });

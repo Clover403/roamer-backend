@@ -27,6 +27,12 @@ export const mockPrisma = {
     createMany: mockFn(),
     create: mockFn(),
   },
+  payment: {
+    create: mockFn(),
+  },
+  analyticsEvent: {
+    create: mockFn(),
+  },
   jointOffer: {
     findMany: mockFn(),
   },

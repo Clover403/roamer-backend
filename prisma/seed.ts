@@ -33,6 +33,15 @@ const assetClassMap = {
 async function main() {
   const passwordHash = await bcrypt.hash("Clover@12345", 12);
   const adminPasswordHash = await bcrypt.hash("Admin@12345", 12);
+  const keeperEmails = ["admin@roamer.ae", "travclover@gmail.com"];
+
+  await prisma.user.deleteMany({
+    where: {
+      email: {
+        notIn: keeperEmails,
+      },
+    },
+  });
 
   const admin = await prisma.user.upsert({
     where: { email: "admin@roamer.ae" },
@@ -42,6 +51,7 @@ async function main() {
       passwordHash: adminPasswordHash,
       role: "ADMIN",
       status: "ACTIVE",
+      isEmailVerified: true,
     },
     create: {
       fullName: "Roamer Admin",
@@ -50,19 +60,22 @@ async function main() {
       passwordHash: adminPasswordHash,
       role: "ADMIN",
       status: "ACTIVE",
+      isEmailVerified: true,
     },
   });
 
   const clover = await prisma.user.upsert({
-    where: { email: "clover@mail.com" },
+    where: { email: "travclover@gmail.com" },
     update: {
-      fullName: "Clover",
+      fullName: "Trav Clover",
       phone: "+971500000000",
       passwordHash,
+      role: "USER",
+      status: "ACTIVE",
     },
     create: {
-      fullName: "Clover",
-      email: "clover@mail.com",
+      fullName: "Trav Clover",
+      email: "travclover@gmail.com",
       phone: "+971500000000",
       passwordHash,
       role: "USER",
@@ -149,7 +162,7 @@ async function main() {
   }
 
   // eslint-disable-next-line no-console
-  console.log(`Seed complete. User Clover: ${clover.email} | Admin: ${admin.email}`);
+  console.log(`Seed complete. User: ${clover.email} | Admin: ${admin.email}`);
 }
 
 main()
