@@ -15,7 +15,7 @@ const DEFAULT_PLATFORM_FEES = {
   rentalFeePct: 12,
   listingFeePct: 1,
   hybridCommissionPct: 1.5,
-  hybridListingFeeAed: 149,
+  hybridListingFeeAed: 1,
 };
 
 const isLegacyListingFeeFieldError = (error: unknown) =>
@@ -33,11 +33,18 @@ const toCreateData = (useLegacyField: boolean) => ({
 });
 
 const normalizeSettingsRow = (row: any): PlatformFeeSettingsDto => ({
+  // NOTE: `hybridListingFeeAed` is kept for backward compatibility in schema naming,
+  // but it is treated as HYBRID UPFRONT FEE PERCENTAGE.
+  // Legacy large AED-like values are normalized to listing fee percentage fallback.
+  // This avoids static upfront values for hybrid model.
   saleCommissionPct: Number(row.saleCommissionPct),
   rentalFeePct: Number(row.rentalFeePct),
   listingFeePct: Number(row.listingFeePct ?? row.listingFeeAed ?? DEFAULT_PLATFORM_FEES.listingFeePct),
   hybridCommissionPct: Number(row.hybridCommissionPct),
-  hybridListingFeeAed: Number(row.hybridListingFeeAed),
+  hybridListingFeeAed:
+    Number(row.hybridListingFeeAed) > 0 && Number(row.hybridListingFeeAed) <= 100
+      ? Number(row.hybridListingFeeAed)
+      : Number(row.listingFeePct ?? row.listingFeeAed ?? DEFAULT_PLATFORM_FEES.listingFeePct),
   updatedById: row.updatedById ?? null,
   updatedAt: new Date(row.updatedAt ?? new Date()).toISOString(),
 });

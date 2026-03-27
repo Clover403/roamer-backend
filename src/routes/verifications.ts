@@ -11,6 +11,7 @@ import {
   uploadVerificationDocument,
 } from "../controllers/verifications.controller";
 import { requireAdmin, requireAuth } from "../middlewares/auth";
+import { verificationSubmissionRateLimiter, verificationUploadRateLimiter } from "../middlewares/rate-limit";
 
 export const verificationRouter = Router();
 
@@ -40,6 +41,7 @@ verificationRouter.get(
 verificationRouter.post(
   "/documents/upload",
   requireAuth,
+  verificationUploadRateLimiter,
   upload.single("file"),
   asyncHandler(uploadVerificationDocument)
 );
@@ -47,6 +49,7 @@ verificationRouter.post(
 verificationRouter.post(
   "/submissions",
   requireAuth,
+  verificationSubmissionRateLimiter,
   asyncHandler(createVerificationSubmission)
 );
 

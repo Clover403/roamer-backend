@@ -49,8 +49,23 @@ const isActiveAdTimeWindow = {
   OR: [{ endsAt: null }, { endsAt: { gt: new Date() } }],
 } as const;
 
+const resolveDevTestingDurationMinutes = (packageDays: number) => {
+  if (packageDays === 3) return 3;
+  if (packageDays === 7) return 7;
+  return null;
+};
+
 const buildAdExpiry = (startsAt: Date, packageDays: number) => {
   const endsAt = new Date(startsAt);
+
+  if (process.env.NODE_ENV === "development") {
+    const durationMinutes = resolveDevTestingDurationMinutes(packageDays);
+    if (durationMinutes !== null) {
+      endsAt.setMinutes(endsAt.getMinutes() + durationMinutes);
+      return endsAt;
+    }
+  }
+
   endsAt.setDate(endsAt.getDate() + packageDays);
   return endsAt;
 };
