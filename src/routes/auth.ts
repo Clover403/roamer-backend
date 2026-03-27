@@ -1,6 +1,15 @@
 import { Router } from "express";
 import { asyncHandler } from "./utils";
-import { login, logout, me, register } from "../controllers/auth.controller";
+import {
+  googleAuthCallback,
+  googleAuthStart,
+  login,
+  logout,
+  me,
+  register,
+  resendEmailVerification,
+  verifyEmail,
+} from "../controllers/auth.controller";
 
 export const authRouter = Router();
 
@@ -12,6 +21,26 @@ authRouter.post(
 authRouter.post(
   "/login",
   asyncHandler(login)
+);
+
+authRouter.post(
+  "/email-verification/resend",
+  asyncHandler(resendEmailVerification)
+);
+
+authRouter.get(
+  "/email-verification/verify",
+  asyncHandler(verifyEmail)
+);
+
+authRouter.get(
+  "/google/start",
+  asyncHandler(googleAuthStart)
+);
+
+authRouter.get(
+  "/google/callback",
+  asyncHandler(googleAuthCallback)
 );
 
 authRouter.get(

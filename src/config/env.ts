@@ -36,6 +36,13 @@ export const env = {
   JWT_EXPIRES_IN: process.env.JWT_EXPIRES_IN ?? "7d",
   JWT_COOKIE_NAME: process.env.JWT_COOKIE_NAME ?? "roamer_access_token",
   JWT_COOKIE_MAX_AGE_MS: toPositiveNumber(process.env.JWT_COOKIE_MAX_AGE_MS, 7 * 24 * 60 * 60 * 1000),
+  APP_BASE_URL: process.env.APP_BASE_URL ?? "http://localhost:5173",
+  RESEND_API_KEY: process.env.RESEND_API_KEY ?? "",
+  RESEND_FROM_EMAIL: process.env.RESEND_FROM_EMAIL ?? "",
+  DEV_SKIP_EMAIL_VERIFICATION: process.env.DEV_SKIP_EMAIL_VERIFICATION === "true",
+  GOOGLE_CLIENT_ID: process.env.GOOGLE_CLIENT_ID ?? "",
+  GOOGLE_CLIENT_SECRET: process.env.GOOGLE_CLIENT_SECRET ?? "",
+  GOOGLE_REDIRECT_URI: process.env.GOOGLE_REDIRECT_URI ?? "",
 };
 
 if (!env.DATABASE_URL) {
@@ -44,4 +51,12 @@ if (!env.DATABASE_URL) {
 
 if (!env.JWT_SECRET) {
   throw new Error("JWT_SECRET is required. Please set it in backend/.env");
+}
+
+if (env.NODE_ENV === "production" && !env.RESEND_API_KEY) {
+  throw new Error("RESEND_API_KEY is required for email verification in production. Please set it in backend/.env");
+}
+
+if (env.NODE_ENV === "production" && !env.RESEND_FROM_EMAIL) {
+  throw new Error("RESEND_FROM_EMAIL is required for email verification in production. Please set it in backend/.env");
 }

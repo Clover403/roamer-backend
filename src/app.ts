@@ -5,8 +5,11 @@ import path from "path";
 import { ZodError } from "zod";
 import { env } from "./config/env";
 import { apiRouter } from "./routes";
+import { apiRateLimiter, authRateLimiter } from "./middlewares/rate-limit";
 
 export const app = express();
+
+app.set("trust proxy", 1);
 
 const normalizeOrigin = (origin: string): string => origin.replace(/\/+$/, "");
 
@@ -65,6 +68,8 @@ app.use(
 app.use(express.json({ limit: "2mb" }));
 app.use(cookieParser());
 app.use("/uploads", express.static(path.resolve(process.cwd(), "uploads")));
+app.use("/api", apiRateLimiter);
+app.use("/api/auth", authRateLimiter);
 
 app.get("/", (_req, res) => {
   res.status(200).json({

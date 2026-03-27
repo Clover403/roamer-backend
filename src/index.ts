@@ -27,7 +27,7 @@ const start = async () => {
     });
   }, CRON_INTERVAL_MS);
 
-  const ADS_CRON_INTERVAL_MS = 60 * 60 * 1000;
+  const ADS_CRON_INTERVAL_MS = env.NODE_ENV === "development" ? 30 * 1000 : 60 * 60 * 1000;
   setInterval(() => {
     void runBannerAdsLifecycle().catch((error: unknown) => {
       // eslint-disable-next-line no-console
