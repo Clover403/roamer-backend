@@ -23,7 +23,7 @@ export const verifyAuthToken = (token: string) => {
 export const setAuthCookie = (res: Response, token: string) => {
   res.cookie(env.JWT_COOKIE_NAME, token, {
     httpOnly: true,
-    sameSite: "lax",
+    sameSite: env.JWT_COOKIE_SAME_SITE,
     secure: env.NODE_ENV === "production",
     maxAge: env.JWT_COOKIE_MAX_AGE_MS,
     path: "/",
@@ -33,7 +33,7 @@ export const setAuthCookie = (res: Response, token: string) => {
 export const clearAuthCookie = (res: Response) => {
   res.clearCookie(env.JWT_COOKIE_NAME, {
     httpOnly: true,
-    sameSite: "lax",
+    sameSite: env.JWT_COOKIE_SAME_SITE,
     secure: env.NODE_ENV === "production",
     path: "/",
   });
