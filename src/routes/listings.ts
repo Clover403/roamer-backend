@@ -9,6 +9,7 @@ import {
   adminReviewListingVerificationById,
   addMaintenanceLog,
   createListing,
+  deleteListingMedia,
   deleteListingById,
   getListingFeeSettings,
   getListingById,
@@ -80,6 +81,12 @@ listingsRouter.post(
   "/:id/media",
   requireAuth,
   asyncHandler(addListingMedia)
+);
+
+listingsRouter.delete(
+  "/:id/media",
+  requireAuth,
+  asyncHandler(deleteListingMedia)
 );
 
 listingsRouter.post(

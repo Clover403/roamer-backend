@@ -13,6 +13,11 @@ type AuthedRequest = Request & {
 type GarageAssetResponse = {
   id: string;
   assetType: "SAVED" | "OWNED" | "RENTED";  // 🆕 Add asset type
+  rentalRequestId?: string | null;
+  rentalStatus?: "REQUESTED" | "APPROVED" | "ACTIVE" | null;
+  rentalStartsAt?: string | null;
+  rentalEndsAt?: string | null;
+  rentalStage?: string | null;
   isManual: boolean;
   make: string;
   model: string;
@@ -266,6 +271,22 @@ export const listMyGarageAssets = async (req: AuthedRequest, res: Response) => {
     orderBy: { offer: { createdAt: "desc" } },
   });
 
+  const renterRentals = await prisma.rentalBooking.findMany({
+    where: {
+      renterId: userId,
+      status: { in: ["REQUESTED", "APPROVED", "ACTIVE"] },
+      ...(listingIdFilter ? { listingId: listingIdFilter } : {}),
+    },
+    include: {
+      listing: {
+        include: {
+          media: true,
+        },
+      },
+    },
+    orderBy: { createdAt: "desc" },
+  });
+
   const latestAcceptedOfferByListing = new Map<string, (typeof acceptedParticipantOffers)[number]>();
   for (const row of acceptedParticipantOffers) {
     if (!latestAcceptedOfferByListing.has(row.offer.listingId)) {
@@ -280,9 +301,17 @@ export const listMyGarageAssets = async (req: AuthedRequest, res: Response) => {
     }
   }
 
+  const activeRentalByListing = new Map<string, (typeof renterRentals)[number]>();
+  for (const rental of renterRentals) {
+    if (!activeRentalByListing.has(rental.listingId)) {
+      activeRentalByListing.set(rental.listingId, rental);
+    }
+  }
+
   const listingIds = new Set<string>([
     ...Array.from(ownedAssetByListing.keys()),
     ...Array.from(latestAcceptedOfferByListing.keys()),
+    ...Array.from(activeRentalByListing.keys()),
   ]);
 
   const listingIdList = Array.from(listingIds);
@@ -305,7 +334,8 @@ export const listMyGarageAssets = async (req: AuthedRequest, res: Response) => {
   for (const listingId of listingIds) {
     const owned = ownedAssetByListing.get(listingId);
     const acceptedOfferRow = latestAcceptedOfferByListing.get(listingId);
-    const listing = owned?.listing ?? acceptedOfferRow?.offer.listing;
+    const activeRental = activeRentalByListing.get(listingId);
+    const listing = owned?.listing ?? acceptedOfferRow?.offer.listing ?? activeRental?.listing;
     const acceptedOffer = acceptedOfferRow?.offer;
     if (!listing) continue;
 
@@ -315,17 +345,19 @@ export const listMyGarageAssets = async (req: AuthedRequest, res: Response) => {
       sortedMedia[0]?.url ??
       "https://images.unsplash.com/photo-1606664515524-ed2f786a0bd6?q=80&w=1400&auto=format&fit=crop";
 
-    const ownershipShare = acceptedOfferRow ? toNumber(acceptedOfferRow.ownershipShare) : 100;
+    const isRentalAsset = !owned && !acceptedOfferRow && Boolean(activeRental);
+    const ownershipShare = isRentalAsset ? 0 : acceptedOfferRow ? toNumber(acceptedOfferRow.ownershipShare) : 100;
     const participantContribution = acceptedOfferRow ? toNumber(acceptedOfferRow.contributionAed) : 0;
     const fallbackListingPrice = toNumber(listing.priceSellAed);
-    const purchasePrice =
-      participantContribution > 0
+    const purchasePrice = isRentalAsset
+      ? toNumber(activeRental?.totalAed ?? activeRental?.subtotalAed ?? 0)
+      : participantContribution > 0
         ? participantContribution
         : fallbackListingPrice > 0
           ? Math.round((fallbackListingPrice * ownershipShare) / 100)
           : 0;
 
-    const listingLatestValue = latestValueByListing.get(listingId) ?? owned?.currentValue ?? null;
+    const listingLatestValue = isRentalAsset ? null : latestValueByListing.get(listingId) ?? owned?.currentValue ?? null;
     const currentValue = listingLatestValue !== null
       ? Math.round((listingLatestValue * ownershipShare) / 100)
       : null;
@@ -333,12 +365,27 @@ export const listMyGarageAssets = async (req: AuthedRequest, res: Response) => {
     const purchaseDate =
       listing.soldAt?.toISOString() ??
       acceptedOffer?.createdAt?.toISOString() ??
+      activeRental?.startDate?.toISOString() ??
       owned?.addedAt?.toISOString() ??
       null;
 
+    const rentalStage =
+      activeRental?.status === "REQUESTED"
+        ? "Waiting seller approval"
+        : activeRental?.status === "APPROVED"
+          ? "Approved by seller"
+          : activeRental?.status === "ACTIVE"
+            ? "Rental active"
+            : null;
+
     const item: GarageAssetResponse = {
       id: listing.id,
-      assetType: owned ? "OWNED" : "RENTED",  // 🆕 Set asset type based on source
+      assetType: isRentalAsset ? "RENTED" : "OWNED",
+      rentalRequestId: activeRental?.id ?? null,
+      rentalStatus: activeRental?.status ?? null,
+      rentalStartsAt: activeRental?.startDate?.toISOString() ?? null,
+      rentalEndsAt: activeRental?.endDate?.toISOString() ?? null,
+      rentalStage,
       isManual: Boolean(owned && owned.notes === MANUAL_ASSET_NOTES),
       make: listing.make ?? "Unknown",
       model: listing.model ?? "Model",

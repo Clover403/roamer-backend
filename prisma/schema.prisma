@@ -496,8 +496,11 @@ model Listing {
   @@index([sellerId, status])
   @@index([sellerId, listingType])
   @@index([category, listingType, status])
+  @@index([status, listingType, createdAt])
+  @@index([status, listingType, publishedAt])
   @@index([moderationStatus, createdAt])
   @@index([verificationType, createdAt])
+  @@index([verificationType, verificationLevel])
 }
 
 model ListingMedia {
@@ -613,6 +616,8 @@ model JointOffer {
   payments     Payment[]
 
   @@index([groupId, status])
+  @@index([listingId, status])
+  @@index([status, updatedAt])
 }
 
 model OfferParticipant {
@@ -657,6 +662,7 @@ model RentalBooking {
 
   @@index([listingId, status])
   @@index([renterId, status])
+  @@index([status, updatedAt])
 }
 
 model Contract {
@@ -783,6 +789,10 @@ model Payment {
   promotion PromotionCampaign? @relation(fields: [promotionId], references: [id], onDelete: SetNull)
 
   @@index([payerId, status, createdAt])
+  @@index([purpose, status, createdAt])
+  @@index([status, createdAt])
+  @@index([offerId, status])
+  @@index([rentalId, status])
 }
 
 model PromotionCampaign {
@@ -840,6 +850,10 @@ model BannerAd {
   reviewer   User?   @relation("BannerAdReviewer", fields: [reviewedById], references: [id], onDelete: SetNull)
 
   @@index([status, createdAt])
+  @@index([status, updatedAt])
+  @@index([status, reviewedAt, createdAt])
+  @@index([status, placementTarget, endsAt])
+  @@index([placementTarget, status, startsAt, createdAt])
   @@index([listingId, status])
   @@index([sellerId, status])
   @@index([endsAt])

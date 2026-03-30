@@ -3,6 +3,7 @@ import { jest } from "@jest/globals";
 const mockFn = () => jest.fn<(...args: any[]) => any>();
 
 export const mockPrisma = {
+  $transaction: mockFn(),
   user: {
     findUnique: mockFn(),
     findMany: mockFn(),
@@ -19,7 +20,9 @@ export const mockPrisma = {
     update: mockFn(),
   },
   listing: {
+    findUnique: mockFn(),
     findMany: mockFn(),
+    update: mockFn(),
     count: mockFn(),
     create: mockFn(),
   },
@@ -29,6 +32,12 @@ export const mockPrisma = {
   },
   payment: {
     create: mockFn(),
+    findMany: mockFn(),
+    findUnique: mockFn(),
+    update: mockFn(),
+  },
+  rentalBooking: {
+    findMany: mockFn(),
   },
   analyticsEvent: {
     create: mockFn(),
@@ -47,4 +56,8 @@ export const resetMockPrisma = () => {
       }
     });
   });
+
+  (mockPrisma.$transaction as jest.Mock).mockImplementation(async (cb: any) => cb(mockPrisma));
 };
+
+resetMockPrisma();

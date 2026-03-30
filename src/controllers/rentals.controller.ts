@@ -2,6 +2,7 @@ import type { Request, Response } from "express";
 import { z } from "zod";
 import { prisma } from "../lib/prisma";
 import { getUserVerificationGate } from "../lib/identity-verification";
+import { ensurePlatformFeeSettings, mapPlatformFeeSettings } from "../lib/platform-fees";
 
 type AuthedRequest = Request & {
   authUser?: {
@@ -116,7 +117,29 @@ export const listRentals = async (req: Request, res: Response) => {
       ...(renterId ? { renterId } : {}),
       ...(sellerId ? { listing: { sellerId } } : {}),
     },
-    include: { listing: true, renter: true, contract: true },
+    include: {
+      listing: {
+        select: {
+          id: true,
+          sellerId: true,
+          make: true,
+          model: true,
+          year: true,
+          listingType: true,
+          status: true,
+          availabilityStatus: true,
+        },
+      },
+      renter: {
+        select: {
+          id: true,
+          fullName: true,
+          email: true,
+          phone: true,
+        },
+      },
+      contract: true,
+    },
     orderBy: { createdAt: "desc" },
   });
 
@@ -262,8 +285,15 @@ export const createRental = async (req: Request, res: Response) => {
     orderBy: { createdAt: "desc" },
   });
 
-  if (activeRental?.status === "ACTIVE") {
-    res.status(400).json({ message: "This listing is currently in an active rental session" });
+  if (activeRental?.status === "APPROVED" || activeRental?.status === "ACTIVE") {
+    const availableAgainAt = activeRental.endDate?.toISOString();
+    res.status(400).json({
+      message:
+        activeRental.status === "APPROVED"
+          ? "This listing already has a confirmed booking and is temporarily unavailable"
+          : "This listing is currently in an active rental session",
+      availableAgainAt,
+    });
     return;
   }
 
@@ -290,12 +320,19 @@ export const createRental = async (req: Request, res: Response) => {
 };
 
 export const sellerDecisionRental = async (req: Request<{ id: string }>, res: Response) => {
+  const authedReq = req as AuthedRequest;
+  const authUserId = authedReq.authUser?.id;
+  if (!authUserId) {
+    res.status(401).json({ message: "Unauthenticated" });
+    return;
+  }
+
   await runRentalLifecycle();
 
   const rentalId = String(req.params.id);
   const payload = z
     .object({
-      sellerId: z.string().min(1),
+      sellerId: z.string().min(1).optional(),
       decision: z.enum(["APPROVE", "REJECT"]),
       reason: z.string().trim().max(500).optional(),
     })
@@ -316,7 +353,7 @@ export const sellerDecisionRental = async (req: Request<{ id: string }>, res: Re
     return;
   }
 
-  if (rental.listing.sellerId !== payload.sellerId) {
+  if (rental.listing.sellerId !== authUserId) {
     res.status(403).json({ message: "Only listing seller can decide this request" });
     return;
   }
@@ -394,12 +431,12 @@ export const sellerDecisionRental = async (req: Request<{ id: string }>, res: Re
     where: { rentalId: rental.id },
     create: {
       contractType: "RENTAL",
-      status: "ACTIVE",
+      status: "PENDING_SIGNATURE",
       listingId: rental.listingId,
       rentalId: rental.id,
       title: `${listingName} Rental Agreement`,
       version: "1.0",
-      startsAt: now,
+      startsAt: rental.startDate,
       endsAt: rental.endDate,
       termsSnapshot: {
         rentalId: rental.id,
@@ -419,11 +456,11 @@ export const sellerDecisionRental = async (req: Request<{ id: string }>, res: Re
       },
     },
     update: {
-      status: "ACTIVE",
+      status: "PENDING_SIGNATURE",
       listingId: rental.listingId,
       title: `${listingName} Rental Agreement`,
       version: "1.0",
-      startsAt: now,
+      startsAt: rental.startDate,
       endsAt: rental.endDate,
       termsSnapshot: {
         rentalId: rental.id,
@@ -444,13 +481,64 @@ export const sellerDecisionRental = async (req: Request<{ id: string }>, res: Re
     },
   });
 
+  const feeSettings = mapPlatformFeeSettings(await ensurePlatformFeeSettings());
+  const rentalFeePct = Number(feeSettings.rentalFeePct ?? 0);
+  const rentalBaseAmountAed = Number(rental.subtotalAed ?? rental.totalAed ?? 0);
+  const expectedRentalFeeAed = Number(((rentalBaseAmountAed * rentalFeePct) / 100).toFixed(2));
+
+  if (expectedRentalFeeAed > 0) {
+    const existingRentalInvoice = await prisma.payment.findFirst({
+      where: {
+        rentalId: rental.id,
+        payerId: rental.listing.sellerId,
+        purpose: "RENTAL",
+      },
+      select: { id: true },
+    });
+
+    if (!existingRentalInvoice) {
+      await prisma.payment.create({
+        data: {
+          payerId: rental.listing.sellerId,
+          purpose: "RENTAL",
+          status: "PENDING",
+          amountAed: expectedRentalFeeAed,
+          currency: "AED",
+          provider: "MANUAL_ADMIN_REVIEW",
+          providerPaymentRef: `RENTAL:${rental.id}:FEE`,
+          rentalId: rental.id,
+        },
+      });
+    }
+  }
+
   const otherRequesters = await prisma.rentalBooking.findMany({
     where: {
       listingId: rental.listingId,
       status: "REQUESTED",
       id: { not: rental.id },
     },
-    select: { renterId: true },
+    select: { id: true, renterId: true },
+  });
+
+  if (otherRequesters.length > 0) {
+    await prisma.rentalBooking.updateMany({
+      where: {
+        id: {
+          in: otherRequesters.map((row: (typeof otherRequesters)[number]) => row.id),
+        },
+      },
+      data: {
+        status: "REJECTED",
+        rejectedAt: now,
+      },
+    });
+  }
+
+  const retryDateLabel = rental.endDate.toLocaleDateString("en-US", {
+    day: "2-digit",
+    month: "short",
+    year: "numeric",
   });
 
   const notificationRows = [
@@ -463,8 +551,8 @@ export const sellerDecisionRental = async (req: Request<{ id: string }>, res: Re
     ...otherRequesters.map((r: (typeof otherRequesters)[number]) => ({
       userId: r.renterId,
       type: "RENTAL" as const,
-      title: "Booking queue is locked",
-      body: `Another renter is currently confirmed for ${listingName}. Your request is temporarily disabled.`,
+      title: "Rental request rejected",
+      body: `Another renter was approved for ${listingName}. Please try again later on ${retryDateLabel}.`,
     })),
   ];
 
@@ -473,7 +561,7 @@ export const sellerDecisionRental = async (req: Request<{ id: string }>, res: Re
   await prisma.analyticsEvent.create({
     data: {
       eventType: "RENTAL_CONFIRMED",
-      actorUserId: payload.sellerId,
+      actorUserId: authUserId,
       listingId: rental.listingId,
       metadata: {
         activityType: "RENTAL_COMPLETED",
@@ -486,15 +574,16 @@ export const sellerDecisionRental = async (req: Request<{ id: string }>, res: Re
 };
 
 export const confirmRentalHandoverBySeller = async (req: Request<{ id: string }>, res: Response) => {
+  const authedReq = req as AuthedRequest;
+  const authUserId = authedReq.authUser?.id;
+  if (!authUserId) {
+    res.status(401).json({ message: "Unauthenticated" });
+    return;
+  }
+
   await runRentalLifecycle();
 
   const rentalId = String(req.params.id);
-  const payload = z
-    .object({
-      sellerId: z.string().min(1),
-    })
-    .parse(req.body);
-
   const rental = await prisma.rentalBooking.findUnique({
     where: { id: rentalId },
     include: {
@@ -509,27 +598,22 @@ export const confirmRentalHandoverBySeller = async (req: Request<{ id: string }>
     return;
   }
 
-  if (rental.listing.sellerId !== payload.sellerId) {
+  if (rental.listing.sellerId !== authUserId) {
     res.status(403).json({ message: "Only listing seller can confirm handover" });
     return;
   }
 
-  if (rental.status === "ACTIVE") {
-    res.status(200).json(rental);
-    return;
-  }
-
   if (rental.status !== "APPROVED") {
+    if (rental.status === "ACTIVE") {
+      res.status(200).json(rental);
+      return;
+    }
     res.status(400).json({ message: "Seller handover is only allowed when booking is confirmed" });
     return;
   }
 
+  const meta = parseRentalMeta(rental.notes);
   const now = new Date();
-  if (now < rental.startDate) {
-    res.status(400).json({ message: "Rental start date has not arrived yet" });
-    return;
-  }
-
   const nextEndDate = computeEndDate(now, rental.durationUnit, rental.durationCount);
   const updated = await prisma.rentalBooking.update({
     where: { id: rental.id },
@@ -538,9 +622,19 @@ export const confirmRentalHandoverBySeller = async (req: Request<{ id: string }>
       startDate: now,
       endDate: nextEndDate,
       notes: serializeRentalMeta({
-        ...parseRentalMeta(rental.notes),
+        ...meta,
         handoverConfirmedAt: now.toISOString(),
+        shippedAt: now.toISOString(),
       }),
+    },
+  });
+
+  await prisma.contract.updateMany({
+    where: { rentalId: rental.id },
+    data: {
+      status: "ACTIVE",
+      startsAt: now,
+      endsAt: nextEndDate,
     },
   });
 
@@ -549,13 +643,23 @@ export const confirmRentalHandoverBySeller = async (req: Request<{ id: string }>
     data: { availabilityStatus: "BOOKED" },
   });
 
-  await prisma.notification.create({
-    data: {
-      userId: rental.renterId,
-      type: "RENTAL",
-      title: "Rental handover confirmed",
-      body: "Your rental has started, enjoy your ride!",
-    },
+  const listingName = [rental.listing.make, rental.listing.model].filter(Boolean).join(" ") || "listing";
+
+  await prisma.notification.createMany({
+    data: [
+      {
+        userId: rental.renterId,
+        type: "RENTAL",
+        title: "Rental is now active",
+        body: `Seller confirmed shipment for ${listingName}. Rental timer is now running.`,
+      },
+      {
+        userId: rental.listing.sellerId,
+        type: "RENTAL",
+        title: "Rental started",
+        body: `You confirmed shipment for ${listingName}. Rental is now active.`,
+      },
+    ],
   });
 
   res.status(200).json(updated);
@@ -897,56 +1001,17 @@ export const confirmRentalReceived = async (req: Request<{ id: string }>, res: R
     return;
   }
 
+  if (rental.status === "ACTIVE") {
+    res.status(200).json(rental);
+    return;
+  }
+
   if (rental.status !== "APPROVED") {
-    res.status(400).json({ message: "Rental is not waiting for receive confirmation" });
+    res.status(400).json({ message: "Rental is not in a receivable state" });
     return;
   }
 
-  const meta = parseRentalMeta(rental.notes);
-  if (!meta.shippedAt) {
-    res.status(400).json({ message: "Seller has not dispatched this rental yet" });
-    return;
-  }
-
-  const now = new Date();
-  const nextEndDate = computeEndDate(now, rental.durationUnit, rental.durationCount);
-  const updated = await prisma.rentalBooking.update({
-    where: { id: rental.id },
-    data: {
-      status: "ACTIVE",
-      startDate: now,
-      endDate: nextEndDate,
-      notes: serializeRentalMeta({
-        ...meta,
-        receivedAt: now.toISOString(),
-      }),
-    },
-  });
-
-  await prisma.listing.update({
-    where: { id: rental.listingId },
-    data: { availabilityStatus: "BOOKED" },
-  });
-
-  const listingName = [rental.listing.make, rental.listing.model].filter(Boolean).join(" ") || "listing";
-  await prisma.notification.createMany({
-    data: [
-      {
-        userId: rental.listing.sellerId,
-        type: "RENTAL",
-        title: "Rental started",
-        body: `Renter confirmed vehicle received for ${listingName}. Rental timer is now active.`,
-      },
-      {
-        userId: rental.renterId,
-        type: "RENTAL",
-        title: "Rental is now active",
-        body: `You confirmed ${listingName} has arrived. Rental duration is now running.`,
-      },
-    ],
-  });
-
-  res.status(200).json(updated);
+  res.status(400).json({ message: "Rental activation is controlled by seller handover confirmation" });
 };
 
 export const runRentalCronNow = async (_req: Request, res: Response) => {

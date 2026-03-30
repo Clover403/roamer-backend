@@ -2,6 +2,7 @@ import type { Request, Response } from "express";
 import { Prisma } from "@prisma/client";
 import { z } from "zod";
 import { prisma } from "../lib/prisma";
+import { getBannerAdPricingSettings, updateBannerAdPricingSettings } from "../lib/ads-pricing";
 
 const MAX_ACTIVE_BANNER_SLOTS: Record<"MARKETPLACE" | "RENTAL", number> = {
   MARKETPLACE: 3,
@@ -92,6 +93,46 @@ export const getBannerAdSlots = async (req: Request, res: Response) => {
     activeSlots,
     availableSlots: Math.max(0, maxSlots - activeSlots),
   });
+};
+
+export const getBannerAdPricing = async (_req: Request, res: Response) => {
+  const pricing = await getBannerAdPricingSettings();
+  res.status(200).json(pricing);
+};
+
+export const adminUpdateBannerAdPricing = async (req: AuthedRequest, res: Response) => {
+  const authUserId = req.authUser?.id;
+  if (!authUserId || req.authUser?.role !== "ADMIN") {
+    res.status(403).json({ message: "Admin access required" });
+    return;
+  }
+
+  const payload = z
+    .object({
+      package3DaysAed: z.number().positive().max(1_000_000).optional(),
+      package7DaysAed: z.number().positive().max(1_000_000).optional(),
+      package30DaysAed: z.number().positive().max(1_000_000).optional(),
+    })
+    .refine((value) => Object.values(value).some((item) => item !== undefined), {
+      message: "At least one package price must be provided",
+    })
+    .parse(req.body);
+
+  const nextThree = payload.package3DaysAed;
+  const nextSeven = payload.package7DaysAed;
+  const nextThirty = payload.package30DaysAed;
+
+  if (nextThree !== undefined && nextSeven !== undefined && nextThree > nextSeven) {
+    res.status(400).json({ message: "3-day package price cannot be higher than 7-day package price" });
+    return;
+  }
+  if (nextSeven !== undefined && nextThirty !== undefined && nextSeven > nextThirty) {
+    res.status(400).json({ message: "7-day package price cannot be higher than 30-day package price" });
+    return;
+  }
+
+  const updated = await updateBannerAdPricingSettings(payload, authUserId);
+  res.status(200).json(updated);
 };
 
 export const listActiveBannerAds = async (req: Request, res: Response) => {
@@ -213,6 +254,26 @@ export const createBannerAd = async (req: AuthedRequest, res: Response) => {
   }
 
   const payload = createBannerAdSchema.parse(req.body);
+  const pricing = await getBannerAdPricingSettings();
+
+  const expectedPriceByDays: Record<number, number> = {
+    3: pricing.package3DaysAed,
+    7: pricing.package7DaysAed,
+    30: pricing.package30DaysAed,
+  };
+
+  const expectedPackagePriceAed = expectedPriceByDays[payload.packageDays];
+  if (!expectedPackagePriceAed) {
+    res.status(400).json({ message: "Unsupported package duration" });
+    return;
+  }
+
+  if (Math.abs(payload.packagePriceAed - expectedPackagePriceAed) > 0.01) {
+    res.status(409).json({
+      message: `Promotion package price changed. Please refresh and retry (AED ${expectedPackagePriceAed}).`,
+    });
+    return;
+  }
 
   const sellerProfile = await prisma.user.findUnique({
     where: { id: authUserId },
@@ -278,7 +339,7 @@ export const createBannerAd = async (req: AuthedRequest, res: Response) => {
     return;
   }
 
-  const status = isSlotsFull ? "WAITLIST" : "PENDING_REVIEW";
+  const status = "PENDING_REVIEW";
 
   const paymentSubmission = {
     senderName: payload.paymentSubmission?.senderName ?? sellerProfile?.fullName,
@@ -336,18 +397,6 @@ export const createBannerAd = async (req: AuthedRequest, res: Response) => {
         body: `${listing.make ?? "Vehicle"} ${listing.model ?? "listing"} is waiting for review.`,
         link: "/admin?tab=promotions",
       })),
-    });
-  }
-
-  if (status === "WAITLIST") {
-    await prisma.notification.create({
-      data: {
-        userId: authUserId,
-        type: "PROMOTION",
-        title: "Added to banner waitlist",
-        body: "All active ad slots are full. Your request is queued and will be reviewed as soon as a slot opens.",
-        link: "/seller-dashboard",
-      },
     });
   }
 
@@ -610,7 +659,19 @@ export const runBannerAdsLifecycle = async () => {
     }
 
     const waitlisted = await prisma.bannerAd.findMany({
-      where: { status: "WAITLIST", placementTarget },
+      where: {
+        status: "WAITLIST",
+        placementTarget,
+        reviewedAt: {
+          not: null,
+        },
+      },
+      select: {
+        id: true,
+        sellerId: true,
+        listingId: true,
+        packageDays: true,
+      },
       orderBy: { createdAt: "asc" },
       take: availableSlots,
     });
@@ -619,24 +680,42 @@ export const runBannerAdsLifecycle = async () => {
       continue;
     }
 
-    await prisma.bannerAd.updateMany({
-      where: {
-        id: {
-          in: waitlisted.map((ad: { id: string }) => ad.id),
+    const startsAt = new Date();
+    const adIdsByPackageDays = new Map<number, string[]>();
+
+    for (const ad of waitlisted) {
+      const current = adIdsByPackageDays.get(ad.packageDays) ?? [];
+      current.push(ad.id);
+      adIdsByPackageDays.set(ad.packageDays, current);
+    }
+
+    const activationOps = Array.from(adIdsByPackageDays.entries()).map(([packageDays, ids]) => {
+      const endsAt = buildAdExpiry(startsAt, packageDays);
+
+      return prisma.bannerAd.updateMany({
+        where: {
+          id: { in: ids },
         },
-      },
-      data: {
-        status: "PENDING_REVIEW",
-      },
+        data: {
+          status: "ACTIVE",
+          startsAt,
+          endsAt,
+          rejectionReason: null,
+        },
+      });
     });
 
+    if (activationOps.length > 0) {
+      await prisma.$transaction(activationOps);
+    }
+
     await prisma.notification.createMany({
-      data: waitlisted.map((ad: { sellerId: string }) => ({
+      data: waitlisted.map((ad: { sellerId: string; listingId: string }) => ({
         userId: ad.sellerId,
         type: "PROMOTION",
-        title: "Banner slot opened",
-        body: `A ${placementTarget.toLowerCase()} slot is now available. Your waitlisted ad has moved to pending review.`,
-        link: "/seller-dashboard",
+        title: "Your waitlisted banner is now live",
+        body: `A ${placementTarget.toLowerCase()} slot opened and your approved waitlisted banner has been activated automatically.`,
+        link: `/car/${ad.listingId}`,
       })),
     });
   }

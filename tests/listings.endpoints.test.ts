@@ -274,6 +274,11 @@ describe("Listings endpoints", () => {
         model: "Cayenne",
         priceSellAed: 300000,
         paymentModel: "listing_fee",
+        feePaymentSubmission: {
+          transferReference: "TRX-LISTING-001",
+          transferredAt: "2026-03-10T12:00:00.000Z",
+          note: "listing fee transfer",
+        },
       });
 
     expect(response.status).toBe(201);

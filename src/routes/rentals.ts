@@ -29,11 +29,13 @@ rentalsRouter.post(
 
 rentalsRouter.patch(
   "/:id/seller-decision",
+  requireAuth,
   asyncHandler(sellerDecisionRental)
 );
 
 rentalsRouter.patch(
   "/:id/handover-confirmation",
+  requireAuth,
   asyncHandler(confirmRentalHandoverBySeller)
 );
 

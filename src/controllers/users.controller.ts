@@ -2,6 +2,7 @@ import type { Request, Response } from "express";
 import type { Prisma } from "@prisma/client";
 import { z } from "zod";
 import { prisma } from "../lib/prisma";
+import { ensurePlatformFeeSettings, mapPlatformFeeSettings } from "../lib/platform-fees";
 import { parsePagination } from "../routes/utils";
 import { buildDayBuckets, getChangePercent, getRangeStart, makeDayKey, parseDashboardRange, rangeToDays } from "./dashboard.utils";
 
@@ -150,6 +151,7 @@ export const listUsers = async (req: Request, res: Response) => {
 
 export const getSellerCommissionInvoices = async (req: Request<{ id: string }>, res: Response) => {
   const sellerId = String(req.params.id);
+  const feeSettings = mapPlatformFeeSettings(await ensurePlatformFeeSettings());
 
   const acceptedCommissionOffers = await prisma.jointOffer.findMany({
     where: {
@@ -184,32 +186,113 @@ export const getSellerCommissionInvoices = async (req: Request<{ id: string }>, 
     (offer: (typeof acceptedCommissionOffers)[number]) => offer.payments.length === 0
   );
 
-  for (const offer of missingCommissionPayments) {
-    const saleAmountAed = Number(offer.offerPriceAed ?? 0);
-    const commissionRatePct = Number(offer.listing.commissionRatePct ?? 0);
-    const expectedCommissionAed = Number(((saleAmountAed * commissionRatePct) / 100).toFixed(2));
+  const missingCommissionRows = missingCommissionPayments
+    .map((offer: (typeof missingCommissionPayments)[number]) => {
+      const saleAmountAed = Number(offer.offerPriceAed ?? 0);
+      const commissionRatePct = Number(offer.listing.commissionRatePct ?? 0);
+      const expectedCommissionAed = Number(((saleAmountAed * commissionRatePct) / 100).toFixed(2));
+      if (expectedCommissionAed <= 0) return null;
 
-    if (expectedCommissionAed <= 0) continue;
-
-    await prisma.payment.create({
-      data: {
+      return {
         payerId: sellerId,
-        purpose: "COMMISSION",
-        status: "PENDING",
+        purpose: "COMMISSION" as const,
+        status: "PENDING" as const,
         amountAed: expectedCommissionAed,
         currency: "AED",
         provider: "MANUAL_ADMIN_REVIEW",
         providerPaymentRef: `OFFER:${offer.id}:COMMISSION`,
         offerId: offer.id,
+      };
+    })
+    .filter(Boolean) as Array<{
+    payerId: string;
+    purpose: "COMMISSION";
+    status: "PENDING";
+    amountAed: number;
+    currency: string;
+    provider: string;
+    providerPaymentRef: string;
+    offerId: string;
+  }>;
+
+  if (missingCommissionRows.length > 0) {
+    await prisma.payment.createMany({ data: missingCommissionRows });
+  }
+
+  const rentalBookings = await prisma.rentalBooking.findMany({
+    where: {
+      listing: { sellerId },
+      status: { in: ["APPROVED", "ACTIVE", "COMPLETED"] },
+    },
+    select: {
+      id: true,
+      subtotalAed: true,
+      listing: {
+        select: {
+          commissionRatePct: true,
+        },
       },
-    });
+    },
+  });
+
+  const rentalIds = rentalBookings.map((booking: (typeof rentalBookings)[number]) => booking.id);
+
+  const existingRentalPayments = rentalIds.length
+    ? await prisma.payment.findMany({
+        where: {
+          payerId: sellerId,
+          purpose: "RENTAL",
+          rentalId: { in: rentalIds },
+        },
+        select: {
+          rentalId: true,
+        },
+      })
+    : [];
+
+  const existingRentalPaymentIds = new Set(
+    existingRentalPayments.map((payment: (typeof existingRentalPayments)[number]) => payment.rentalId).filter(Boolean)
+  );
+
+  const rentalFeePct = Number(feeSettings.rentalFeePct ?? 0);
+  const missingRentalRows = rentalBookings
+    .filter((rental: (typeof rentalBookings)[number]) => !existingRentalPaymentIds.has(rental.id))
+    .map((rental: (typeof rentalBookings)[number]) => {
+      const baseAmountAed = Number(rental.subtotalAed ?? 0);
+      const expectedRentalFeeAed = Number(((baseAmountAed * rentalFeePct) / 100).toFixed(2));
+      if (expectedRentalFeeAed <= 0) return null;
+
+      return {
+        payerId: sellerId,
+        purpose: "RENTAL" as const,
+        status: "PENDING" as const,
+        amountAed: expectedRentalFeeAed,
+        currency: "AED",
+        provider: "MANUAL_ADMIN_REVIEW",
+        providerPaymentRef: `RENTAL:${rental.id}:FEE`,
+        rentalId: rental.id,
+      };
+    })
+    .filter(Boolean) as Array<{
+    payerId: string;
+    purpose: "RENTAL";
+    status: "PENDING";
+    amountAed: number;
+    currency: string;
+    provider: string;
+    providerPaymentRef: string;
+    rentalId: string;
+  }>;
+
+  if (missingRentalRows.length > 0) {
+    await prisma.payment.createMany({ data: missingRentalRows });
   }
 
   const payments = await prisma.payment.findMany({
     where: {
       payerId: sellerId,
       purpose: {
-        in: ["COMMISSION", "LISTING_FEE"],
+        in: ["COMMISSION", "LISTING_FEE", "RENTAL"],
       },
     },
     include: {
@@ -217,6 +300,23 @@ export const getSellerCommissionInvoices = async (req: Request<{ id: string }>, 
         select: {
           id: true,
           offerPriceAed: true,
+          listing: {
+            select: {
+              id: true,
+              make: true,
+              model: true,
+              year: true,
+              paymentModel: true,
+              commissionRatePct: true,
+            },
+          },
+        },
+      },
+      rental: {
+        select: {
+          id: true,
+          subtotalAed: true,
+          totalAed: true,
           listing: {
             select: {
               id: true,
@@ -273,11 +373,21 @@ export const getSellerCommissionInvoices = async (req: Request<{ id: string }>, 
       return match?.[1] ?? null;
     })();
     const listingFromRef = listingFromRefId ? listingById.get(listingFromRefId) : null;
-    const listing = listingFromOffer ?? listingFromRef;
+    const listingFromRental = payment.rental?.listing;
+    const listing = listingFromOffer ?? listingFromRef ?? listingFromRental;
 
     const listingFromRefPriceAed = Number((listingFromRef as { priceSellAed?: unknown } | null)?.priceSellAed ?? 0);
-    const saleAmountAed = Number(payment.offer?.offerPriceAed ?? listingFromRefPriceAed ?? 0);
-    const commissionRatePct = payment.purpose === "COMMISSION" ? Number(listingFromOffer?.commissionRatePct ?? 0) : 0;
+    const rentalSubtotalAed = Number(payment.rental?.subtotalAed ?? payment.rental?.totalAed ?? 0);
+    const saleAmountAed =
+      payment.purpose === "RENTAL"
+        ? rentalSubtotalAed
+        : Number(payment.offer?.offerPriceAed ?? listingFromRefPriceAed ?? 0);
+    const commissionRatePct =
+      payment.purpose === "COMMISSION"
+        ? Number(listingFromOffer?.commissionRatePct ?? 0)
+        : payment.purpose === "RENTAL"
+          ? rentalFeePct
+          : 0;
     const expectedCommissionAed = Number(payment.amountAed ?? 0);
     const transferMeta = parseTransferMetaFromPaymentRef(payment.providerPaymentRef);
     const transferStatus =
@@ -368,8 +478,8 @@ export const submitSellerFeeInvoiceTransfer = async (req: Request<{ id: string; 
     return;
   }
 
-  if (payment.purpose !== "LISTING_FEE" && payment.purpose !== "COMMISSION") {
-    res.status(400).json({ message: "Only LISTING_FEE or COMMISSION invoices are allowed" });
+  if (payment.purpose !== "LISTING_FEE" && payment.purpose !== "COMMISSION" && payment.purpose !== "RENTAL") {
+    res.status(400).json({ message: "Only LISTING_FEE, COMMISSION, or RENTAL invoices are allowed" });
     return;
   }
 
@@ -410,6 +520,42 @@ export const submitSellerFeeInvoiceTransfer = async (req: Request<{ id: string; 
       })),
     });
   }
+
+  res.status(200).json(updated);
+};
+
+export const uploadUserAvatar = async (
+  req: Request<{ id: string }> & { file?: Express.Multer.File; authUser?: { id: string; role: "USER" | "ADMIN" } },
+  res: Response
+) => {
+  const userId = String(req.params.id);
+  const authUser = req.authUser;
+
+  if (!authUser) {
+    res.status(401).json({ message: "Unauthenticated" });
+    return;
+  }
+
+  if (authUser.id !== userId && authUser.role !== "ADMIN") {
+    res.status(403).json({ message: "You are not allowed to update this avatar" });
+    return;
+  }
+
+  if (!req.file) {
+    res.status(400).json({ message: "No file uploaded" });
+    return;
+  }
+
+  const avatarUrl = `/uploads/avatars/${req.file.filename}`;
+
+  const updated = await prisma.user.update({
+    where: { id: userId },
+    data: { avatarUrl },
+    select: {
+      id: true,
+      avatarUrl: true,
+    },
+  });
 
   res.status(200).json(updated);
 };
@@ -607,13 +753,42 @@ export const getSellerDashboardOverview = async (req: Request<{ id: string }>, r
       where: { listing: { sellerId } },
       take: 20,
       orderBy: { createdAt: "desc" },
-      include: { renter: true, listing: true },
+      include: {
+        renter: {
+          select: {
+            id: true,
+            fullName: true,
+            email: true,
+            phone: true,
+          },
+        },
+        listing: true,
+      },
     }),
     prisma.jointOffer.findMany({
       where: { listing: { sellerId } },
         take: 20,
       orderBy: { createdAt: "desc" },
-      include: { listing: true, participants: true, group: true },
+      include: {
+        listing: true,
+        participants: true,
+        group: {
+          include: {
+            members: {
+              include: {
+                user: {
+                  select: {
+                    id: true,
+                    fullName: true,
+                    email: true,
+                    phone: true,
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
     }),
     prisma.conversationParticipant.count({
       where: {

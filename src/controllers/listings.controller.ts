@@ -76,9 +76,16 @@ const createListingSchema = z.object({
   inspectorName: z.string().optional(),
   inspectorCompany: z.string().optional(),
   verificationType: z.enum(["NONE", "ROAMER", "THIRD_PARTY"]).optional(),
+  feePaymentSubmission: z
+    .object({
+      transferReference: z.string().trim().min(3).max(120),
+      transferredAt: z.string().datetime(),
+      note: z.string().trim().max(500).optional(),
+    })
+    .optional(),
 });
 
-const updateListingSchema = createListingSchema.partial().extend({
+const updateListingSchema = createListingSchema.omit({ feePaymentSubmission: true }).partial().extend({
   status: z.enum(["DRAFT", "ACTIVE", "PAUSED", "SOLD", "EXPIRED", "ARCHIVED"]).optional(),
 });
 
@@ -129,8 +136,40 @@ const mediaSchema = z.object({
   fileSizeBytes: z.number().int().optional(),
 });
 
+const deleteMediaSchema = z
+  .object({
+    mediaTypes: z.array(mediaSchema.shape.mediaType).optional(),
+    mediaIds: z.array(z.string().min(1)).optional(),
+  })
+  .superRefine((payload, ctx) => {
+    if ((!payload.mediaTypes || payload.mediaTypes.length === 0) && (!payload.mediaIds || payload.mediaIds.length === 0)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["mediaTypes"],
+        message: "Provide mediaTypes or mediaIds",
+      });
+    }
+  });
+
 const MANUAL_GARAGE_ASSET_NOTES = "Created from Add to Garage";
 const buildListingFeePaymentRef = (listingId: string) => `LISTING:${listingId}:FEE`;
+const parsePaymentRefBase = (value?: string | null) => String(value ?? "").split("|")[0] ?? "";
+const appendTransferMetaToPaymentRef = (
+  baseRef: string,
+  payload: {
+    transferReference: string;
+    transferredAt: string;
+    note?: string;
+  }
+) => {
+  const params = new URLSearchParams();
+  params.set("transferReference", payload.transferReference);
+  params.set("transferredAt", payload.transferredAt);
+  if (payload.note?.trim()) {
+    params.set("note", payload.note.trim());
+  }
+  return `${baseRef}|${params.toString()}`;
+};
 
 const listListingsQuerySchema = z.object({
   q: z.string().optional(),
@@ -142,6 +181,15 @@ const listListingsQuerySchema = z.object({
   verificationType: z.enum(["NONE", "ROAMER", "THIRD_PARTY"]).optional(),
   verificationLevel: z.enum(["NONE", "ROAMER", "THIRD_PARTY"]).optional(),
 });
+
+const normalizeListingAvailability = (
+  listing: { id: string; listingType: "SELL" | "RENT"; availabilityStatus: "AVAILABLE" | "BOOKED" | "UNAVAILABLE" },
+  hasActiveRental: boolean
+) => {
+  if (listing.listingType !== "RENT") return listing.availabilityStatus;
+  if (listing.availabilityStatus === "UNAVAILABLE") return "UNAVAILABLE";
+  return hasActiveRental ? "BOOKED" : "AVAILABLE";
+};
 
 export const listListings = async (req: Request, res: Response) => {
   await purgeCancelledGroups(prisma);
@@ -212,9 +260,26 @@ export const listListings = async (req: Request, res: Response) => {
     prisma.listing.count({ where }),
   ]);
 
+  const rentListingIds = items
+    .filter((item: (typeof items)[number]) => item.listingType === "RENT")
+    .map((item: (typeof items)[number]) => item.id);
+
+  const activeRentals = rentListingIds.length
+    ? await prisma.rentalBooking.findMany({
+        where: {
+          listingId: { in: rentListingIds },
+          status: "ACTIVE",
+        },
+        select: { listingId: true },
+      })
+    : [];
+
+  const activeRentalSet = new Set(activeRentals.map((row: (typeof activeRentals)[number]) => row.listingId));
+
   res.status(200).json({
     items: items.map((item: (typeof items)[number]) => ({
       ...item,
+      availabilityStatus: normalizeListingAvailability(item, activeRentalSet.has(item.id)),
       groupsActive: item._count.groups,
     })),
     total,
@@ -256,9 +321,10 @@ export const createListing = async (req: Request, res: Response) => {
   }
 
   const payload = createListingSchema.parse(req.body);
+  const { feePaymentSubmission, ...listingPayload } = payload;
   const feeSettings = mapPlatformFeeSettings(await ensurePlatformFeeSettings());
 
-  const requestedPaymentModel = String(payload.paymentModel ?? "commission").toLowerCase();
+  const requestedPaymentModel = String(listingPayload.paymentModel ?? "commission").toLowerCase();
   const selectedPaymentModel =
     requestedPaymentModel === "listing_fee" || requestedPaymentModel === "hybrid" || requestedPaymentModel === "commission"
       ? requestedPaymentModel
@@ -268,7 +334,7 @@ export const createListing = async (req: Request, res: Response) => {
   let commissionRatePct: number | undefined;
   let listingFeeAed: number | undefined;
 
-  const sellPriceAed = payload.priceSellAed ?? 0;
+  const sellPriceAed = listingPayload.priceSellAed ?? 0;
   const listingFeeByPct = sellPriceAed > 0 ? Number(((sellPriceAed * feeSettings.listingFeePct) / 100).toFixed(2)) : undefined;
   const hybridUpfrontPct =
     feeSettings.hybridListingFeeAed > 0 && feeSettings.hybridListingFeeAed <= 100
@@ -276,7 +342,7 @@ export const createListing = async (req: Request, res: Response) => {
       : feeSettings.listingFeePct;
   const hybridListingFeeByPct = sellPriceAed > 0 ? Number(((sellPriceAed * hybridUpfrontPct) / 100).toFixed(2)) : undefined;
 
-  if (payload.listingType === "RENT") {
+  if (listingPayload.listingType === "RENT") {
     paymentModel = "commission";
     commissionRatePct = feeSettings.rentalFeePct;
     listingFeeAed = undefined;
@@ -291,9 +357,21 @@ export const createListing = async (req: Request, res: Response) => {
     listingFeeAed = undefined;
   }
 
+  const requiresUpfrontListingFee =
+    listingPayload.listingType === "SELL" &&
+    (paymentModel === "listing_fee" || paymentModel === "hybrid") &&
+    Number(listingFeeAed ?? 0) > 0;
+
+  if (requiresUpfrontListingFee && !feePaymentSubmission) {
+    res.status(400).json({
+      message: "Listing fee payment submission is required before publishing this listing",
+    });
+    return;
+  }
+
   const listing = await prisma.listing.create({
     data: {
-      ...payload,
+      ...listingPayload,
       paymentModel,
       commissionRatePct,
       listingFeeAed,
@@ -322,11 +400,16 @@ export const createListing = async (req: Request, res: Response) => {
     },
   });
 
-  if (
-    listing.listingType === "SELL" &&
-    (listing.paymentModel === "listing_fee" || listing.paymentModel === "hybrid") &&
-    Number(listing.listingFeeAed ?? 0) > 0
-  ) {
+  if (requiresUpfrontListingFee) {
+    const baseRef = buildListingFeePaymentRef(listing.id);
+    const providerPaymentRef = feePaymentSubmission
+      ? appendTransferMetaToPaymentRef(baseRef, {
+          transferReference: feePaymentSubmission.transferReference,
+          transferredAt: feePaymentSubmission.transferredAt,
+          note: feePaymentSubmission.note,
+        })
+      : baseRef;
+
     await prisma.payment.create({
       data: {
         payerId: authUserId,
@@ -334,8 +417,8 @@ export const createListing = async (req: Request, res: Response) => {
         status: "PENDING",
         amountAed: Number(listing.listingFeeAed ?? 0),
         currency: "AED",
-        provider: "MANUAL_ADMIN_REVIEW",
-        providerPaymentRef: buildListingFeePaymentRef(listing.id),
+        provider: feePaymentSubmission ? "MANUAL_TRANSFER_SUBMITTED" : "MANUAL_ADMIN_REVIEW",
+        providerPaymentRef,
       },
     });
   }
@@ -351,10 +434,23 @@ export const createListing = async (req: Request, res: Response) => {
         userId: admin.id,
         type: "LISTING",
         title: "New listing needs verification",
-        body: `${payload.make ?? "Listing"} ${payload.model ?? ""}`.trim() || "A listing is waiting for admin review.",
+        body: `${listingPayload.make ?? "Listing"} ${listingPayload.model ?? ""}`.trim() || "A listing is waiting for admin review.",
         link: "/admin?tab=listings",
       })),
     });
+
+    if (requiresUpfrontListingFee && feePaymentSubmission) {
+      await prisma.notification.createMany({
+        data: admins.map((admin: { id: string }) => ({
+          userId: admin.id,
+          type: "SYSTEM",
+          priority: "HIGH",
+          title: "Listing fee transfer submitted",
+          body: `Seller submitted listing fee transfer for ${(listingPayload.make ?? "Listing")} ${(listingPayload.model ?? "").trim()} (AED ${Number(listing.listingFeeAed ?? 0).toFixed(2)}).`,
+          link: "/admin?tab=fee-settings",
+        })),
+      });
+    }
   }
 
   await prisma.notification.create({
@@ -405,8 +501,22 @@ export const getListingById = async (req: Request<{ id: string }>, res: Response
     return;
   }
 
+  const hasActiveRental =
+    item.listingType === "RENT"
+      ? Boolean(
+          await prisma.rentalBooking.findFirst({
+            where: {
+              listingId,
+              status: "ACTIVE",
+            },
+            select: { id: true },
+          })
+        )
+      : false;
+
   res.status(200).json({
     ...item,
+    availabilityStatus: normalizeListingAvailability(item, hasActiveRental),
     groupsActive: item._count.groups,
   });
 };
@@ -568,47 +678,34 @@ export const adminReviewListingById = async (req: Request<{ id: string }>, res: 
     ? `${payload.rejectionArea ? `Ditolak pada bagian: ${payload.rejectionArea}. ` : ""}${payload.reason ?? "Perlu perbaikan pada data listing."}`
     : null;
 
-  const updated = await prisma.$transaction(async (tx: typeof prisma) => {
-    if (
-      payload.decision === "APPROVE" &&
-      existing.listingType === "SELL" &&
-      (existing.paymentModel === "listing_fee" || existing.paymentModel === "hybrid") &&
-      Number(existing.listingFeeAed ?? 0) > 0
-    ) {
-      const paymentRef = buildListingFeePaymentRef(existing.id);
-      const latestListingFeePayment = await tx.payment.findFirst({
-        where: {
-          payerId: existing.sellerId,
-          purpose: "LISTING_FEE",
-          providerPaymentRef: paymentRef,
-        },
-        orderBy: { createdAt: "desc" },
-      });
+  const requiresUpfrontListingFee =
+    existing.listingType === "SELL" &&
+    (existing.paymentModel === "listing_fee" || existing.paymentModel === "hybrid") &&
+    Number(existing.listingFeeAed ?? 0) > 0;
 
-      if (!latestListingFeePayment) {
-        await tx.payment.create({
-          data: {
-            payerId: existing.sellerId,
-            purpose: "LISTING_FEE",
-            status: "PAID",
-            amountAed: Number(existing.listingFeeAed ?? 0),
-            currency: "AED",
-            provider: "MANUAL_ADMIN_APPROVED",
-            providerPaymentRef: paymentRef,
-            paidAt: now,
-          },
-        });
-      } else if (latestListingFeePayment.status !== "PAID") {
-        await tx.payment.update({
-          where: { id: latestListingFeePayment.id },
-          data: {
-            status: "PAID",
-            paidAt: now,
-            provider: "MANUAL_ADMIN_APPROVED",
-          },
-        });
-      }
+  if (payload.decision === "APPROVE" && requiresUpfrontListingFee) {
+    const paymentRef = buildListingFeePaymentRef(existing.id);
+    const latestListingFeePayment = await prisma.payment.findFirst({
+      where: {
+        payerId: existing.sellerId,
+        purpose: "LISTING_FEE",
+      },
+      orderBy: { createdAt: "desc" },
+    });
+
+    const paymentMatchesListing = latestListingFeePayment
+      ? parsePaymentRefBase(latestListingFeePayment.providerPaymentRef) === paymentRef
+      : false;
+
+    if (!latestListingFeePayment || !paymentMatchesListing || latestListingFeePayment.status !== "PAID") {
+      res.status(409).json({
+        message: "Listing fee payment must be confirmed by admin before this listing can be approved",
+      });
+      return;
     }
+  }
+
+  const updated = await prisma.$transaction(async (tx: typeof prisma) => {
 
     return tx.listing.update({
       where: { id: listingId },
@@ -630,9 +727,9 @@ export const adminReviewListingById = async (req: Request<{ id: string }>, res: 
       title: payload.decision === "APPROVE" ? "Listing verified and live" : "Listing rejected by admin",
       body:
         payload.decision === "APPROVE"
-          ? `${existing.make ?? "Listing"} ${existing.model ?? ""}`.trim() + " sudah tayang di marketplace."
-          : rejectionMessage ?? "Listing ditolak. Silakan perbaiki lalu submit ulang.",
-      link: payload.decision === "APPROVE" ? `/car/${existing.id}` : `/seller/manage/${existing.id}`,
+          ? `${existing.make ?? "Listing"} ${existing.model ?? ""}`.trim() + " is now live on the marketplace."
+          : rejectionMessage ?? "Listing was rejected. Please fix the details and resubmit.",
+      link: payload.decision === "APPROVE" ? `/car/${existing.id}` : `/manage-listing/${existing.id}`,
     },
   });
 
@@ -695,7 +792,7 @@ export const adminReviewListingVerificationById = async (req: Request<{ id: stri
         payload.decision === "APPROVE"
           ? `${existing.make ?? "Listing"} ${existing.model ?? ""}`.trim() + " verification has been approved by admin."
           : rejectedMessage,
-      link: `/seller/manage/${existing.id}`,
+      link: `/manage-listing/${existing.id}`,
     },
   });
 
@@ -822,6 +919,52 @@ export const uploadListingMedia = async (
   });
 
   res.status(201).json(media);
+};
+
+export const deleteListingMedia = async (req: Request<{ id: string }>, res: Response) => {
+  const authedReq = req as AuthedRequest;
+  const authUserId = authedReq.authUser?.id;
+  if (!authUserId) {
+    res.status(401).json({ message: "Unauthenticated" });
+    return;
+  }
+
+  const listingId = String(req.params.id);
+  const payload = deleteMediaSchema.parse(req.body ?? {});
+
+  const existing = await prisma.listing.findUnique({
+    where: { id: listingId },
+    select: { sellerId: true },
+  });
+
+  if (!existing) {
+    res.status(404).json({ message: "Listing not found" });
+    return;
+  }
+
+  if (authedReq.authUser?.role !== "ADMIN" && existing.sellerId !== authUserId) {
+    res.status(403).json({ message: "You can only edit your own listing" });
+    return;
+  }
+
+  const where: {
+    listingId: string;
+    mediaType?: { in: typeof payload.mediaTypes };
+    id?: { in: typeof payload.mediaIds };
+  } = {
+    listingId,
+  };
+
+  if (payload.mediaTypes && payload.mediaTypes.length > 0) {
+    where.mediaType = { in: payload.mediaTypes };
+  }
+
+  if (payload.mediaIds && payload.mediaIds.length > 0) {
+    where.id = { in: payload.mediaIds };
+  }
+
+  const result = await prisma.listingMedia.deleteMany({ where });
+  res.status(200).json({ deletedCount: result.count });
 };
 
 export const addMaintenanceLog = async (req: Request<{ id: string }>, res: Response) => {

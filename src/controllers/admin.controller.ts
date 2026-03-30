@@ -6,7 +6,14 @@ import {
   mapPlatformFeeSettings,
   updatePlatformFeeSettings,
 } from "../lib/platform-fees";
-import { buildDayBuckets, getRangeStart, makeDayKey, parseDashboardRange } from "./dashboard.utils";
+import {
+  buildDayBuckets,
+  buildRangeBuckets,
+  getRangeStart,
+  makeDayKey,
+  parseDashboardRange,
+  parseDashboardYear,
+} from "./dashboard.utils";
 
 type AuthedRequest = Request & {
   authUser?: {
@@ -15,29 +22,14 @@ type AuthedRequest = Request & {
   };
 };
 
-const makeMonthKey = (date: Date) => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}`;
-
-const buildMonthBuckets = (months = 12) => {
-  const now = new Date();
-  const currentMonthStart = new Date(now.getFullYear(), now.getMonth(), 1);
-
-  const keys: string[] = [];
-  const labels: string[] = [];
-  const map = new Map<string, number>();
-
-  for (let i = months - 1; i >= 0; i -= 1) {
-    const d = new Date(currentMonthStart.getFullYear(), currentMonthStart.getMonth() - i, 1);
-    const key = makeMonthKey(d);
-    keys.push(key);
-    labels.push(d.toLocaleDateString("en-US", { month: "short" }));
-    map.set(key, 0);
-  }
-
-  const startDate = new Date(currentMonthStart.getFullYear(), currentMonthStart.getMonth() - (months - 1), 1);
-  return { keys, labels, map, startDate };
-};
-
 const toMoney = (value: unknown) => Number((Number(value ?? 0)).toFixed(2));
+const parsePageLimit = (query: Request["query"], defaults?: { page?: number; limit?: number; maxLimit?: number }) => {
+  const page = Math.max(1, Number(query.page ?? defaults?.page ?? 1) || 1);
+  const rawLimit = Math.max(1, Number(query.limit ?? defaults?.limit ?? 10) || 10);
+  const maxLimit = Math.max(1, defaults?.maxLimit ?? 50);
+  const limit = Math.min(rawLimit, maxLimit);
+  return { page, limit, skip: (page - 1) * limit };
+};
 const parsePaymentRefBase = (value?: string | null) => String(value ?? "").split("|")[0] ?? "";
 const parseTransferMetaFromPaymentRef = (value?: string | null) => {
   const raw = String(value ?? "");
@@ -60,284 +52,174 @@ const parseTransferMetaFromPaymentRef = (value?: string | null) => {
 const buildListingTitle = (listing?: { make?: string | null; model?: string | null; year?: number | null } | null) =>
   [listing?.make, listing?.model, listing?.year ? String(listing.year) : null].filter(Boolean).join(" ") || "Listing";
 
+const getPaidRevenueOccurredAt = (payment: { paidAt?: Date | null; updatedAt: Date; createdAt: Date }) =>
+  payment.paidAt ?? payment.updatedAt ?? payment.createdAt;
+
+const monetizedBannerStatuses: Array<"WAITLIST" | "ACTIVE" | "EXPIRED"> = ["WAITLIST", "ACTIVE", "EXPIRED"];
+
 export const getAdminDashboardOverview = async (_req: Request, res: Response) => {
   const [
     users,
     listings,
     pendingVerifications,
     activePromotions,
-    pendingBadgeQueue,
+    activeListings,
+    activeSaleListings,
+    activeRentListings,
+    soldListings,
+    draftListings,
     roamerVerifiedListings,
     thirdPartyVerifiedListings,
     pendingVerificationListings,
     salePayments,
     rentalPayments,
-    promotionPayments,
-    acceptedOffersWithoutCommissionInvoice,
+    promotionRevenueAgg,
     recentUsers,
-    recentLogoutEvents,
     recentPostedListings,
     recentAcceptedOffers,
     recentSuccessfulRentals,
-    recentPromotionPayments,
+    recentApprovedBannerAds,
     recentActiveBannerAds,
-    soldListingsWithoutAcceptedOffer,
   ] = await Promise.all([
     prisma.user.count(),
     prisma.listing.count(),
     prisma.verificationSubmission.count({ where: { status: "PENDING" } }),
-    prisma.promotionCampaign.count({ where: { status: "ACTIVE" } }),
-    prisma.verificationSubmission.count({ where: { status: "PENDING" } }),
+    prisma.bannerAd.count({ where: { status: "ACTIVE" } }),
+    prisma.listing.count({ where: { status: "ACTIVE" } }),
+    prisma.listing.count({ where: { status: "ACTIVE", listingType: "SELL" } }),
+    prisma.listing.count({ where: { status: "ACTIVE", listingType: "RENT" } }),
+    prisma.listing.count({ where: { status: "SOLD" } }),
+    prisma.listing.count({ where: { status: { in: ["DRAFT", "PAUSED"] } } }),
     prisma.listing.count({ where: { verificationLevel: "ROAMER" } }),
     prisma.listing.count({ where: { verificationLevel: "THIRD_PARTY" } }),
     prisma.listing.count({ where: { verificationType: { in: ["ROAMER", "THIRD_PARTY"] }, verificationLevel: "NONE" } }),
     prisma.payment.aggregate({
-      where: {
-        purpose: { in: ["LISTING_FEE", "COMMISSION"] },
-        status: { in: ["PAID", "PENDING"] },
-      },
+      where: { purpose: { in: ["LISTING_FEE", "COMMISSION"] }, status: "PAID" },
       _sum: { amountAed: true },
     }),
     prisma.payment.aggregate({
-      where: {
-        purpose: "RENTAL",
-        status: { in: ["PAID", "PENDING"] },
-      },
+      where: { purpose: "RENTAL", status: "PAID" },
       _sum: { amountAed: true },
     }),
-    prisma.payment.aggregate({
+    prisma.bannerAd.aggregate({
       where: {
-        purpose: "PROMOTION",
-        status: { in: ["PAID", "PENDING"] },
+        status: { in: monetizedBannerStatuses },
       },
-      _sum: { amountAed: true },
-    }),
-    prisma.jointOffer.findMany({
-      where: {
-        status: "ACCEPTED",
-        listing: {
-          paymentModel: { in: ["commission", "hybrid"] },
-        },
-        payments: {
-          none: {
-            purpose: "COMMISSION",
-          },
-        },
-      },
-      select: {
-        offerPriceAed: true,
-        listing: {
-          select: {
-            commissionRatePct: true,
-          },
-        },
-      },
+      _sum: { packagePriceAed: true },
     }),
     prisma.user.findMany({
       orderBy: { createdAt: "desc" },
       take: 20,
       select: { id: true, fullName: true, email: true, createdAt: true },
     }),
-    prisma.analyticsEvent.findMany({
-      where: { eventType: "CHAT_MESSAGE" },
-      include: {
-        actor: {
-          select: { fullName: true, email: true },
-        },
-      },
-      orderBy: { createdAt: "desc" },
-      take: 50,
-    }),
     prisma.listing.findMany({
       orderBy: { createdAt: "desc" },
       take: 20,
-      include: {
-        seller: {
-          select: { fullName: true, email: true },
-        },
-      },
+      include: { seller: { select: { fullName: true, email: true } } },
     }),
     prisma.jointOffer.findMany({
       where: { status: "ACCEPTED" },
       orderBy: { updatedAt: "desc" },
       take: 20,
       include: {
-        listing: {
-          select: { make: true, model: true, year: true },
-        },
-        group: {
-          select: { name: true },
-        },
+        listing: { select: { make: true, model: true, year: true } },
+        group: { select: { name: true } },
       },
     }),
     prisma.rentalBooking.findMany({
-      where: {
-        status: { in: ["APPROVED", "ACTIVE", "COMPLETED"] },
-      },
+      where: { status: { in: ["APPROVED", "ACTIVE", "COMPLETED"] } },
       orderBy: { updatedAt: "desc" },
       take: 20,
       include: {
-        listing: {
-          select: { make: true, model: true, year: true },
-        },
-        renter: {
-          select: { fullName: true, email: true },
-        },
-      },
-    }),
-    prisma.payment.findMany({
-      where: {
-        purpose: "PROMOTION",
-        status: { in: ["PAID", "PENDING"] },
-      },
-      orderBy: { createdAt: "desc" },
-      take: 20,
-      include: {
-        payer: {
-          select: { fullName: true, email: true },
-        },
-        promotion: {
-          include: {
-            listing: {
-              select: { make: true, model: true, year: true },
-            },
-          },
-        },
+        listing: { select: { make: true, model: true, year: true } },
+        renter: { select: { fullName: true, email: true } },
       },
     }),
     prisma.bannerAd.findMany({
       where: {
-        status: "ACTIVE",
+        status: { in: monetizedBannerStatuses },
       },
+      orderBy: { createdAt: "desc" },
+      take: 20,
+      include: {
+        seller: { select: { fullName: true, email: true } },
+        listing: { select: { make: true, model: true, year: true } },
+      },
+    }),
+    prisma.bannerAd.findMany({
+      where: { status: "ACTIVE" },
       orderBy: { updatedAt: "desc" },
       take: 20,
       include: {
-        seller: {
-          select: { fullName: true, email: true },
-        },
-        listing: {
-          select: { make: true, model: true, year: true },
-        },
-      },
-    }),
-    prisma.listing.findMany({
-      where: {
-        status: "SOLD",
-        paymentModel: { in: ["commission", "hybrid"] },
-        offers: {
-          none: {
-            status: "ACCEPTED",
-          },
-        },
-      },
-      select: {
-        priceSellAed: true,
-        commissionRatePct: true,
+        seller: { select: { fullName: true, email: true } },
+        listing: { select: { make: true, model: true, year: true } },
       },
     }),
   ]);
 
-  const [activeListings, soldListings, draftListings] = await Promise.all([
-    prisma.listing.count({ where: { status: "ACTIVE" } }),
-    prisma.listing.count({ where: { status: "SOLD" } }),
-    prisma.listing.count({ where: { status: "DRAFT" } }),
-  ]);
-
-  const missingCommissionRevenue = acceptedOffersWithoutCommissionInvoice.reduce((acc: number, item: any) => {
-    const saleAmountAed = Number(item.offerPriceAed ?? 0);
-    const commissionRatePct = Number(item.listing.commissionRatePct ?? 0);
-    const expected = Number(((saleAmountAed * commissionRatePct) / 100).toFixed(2));
-    return acc + expected;
-  }, 0);
-
-  const soldListingFallbackRevenue = soldListingsWithoutAcceptedOffer.reduce((acc: number, listing: any) => {
-    const saleAmountAed = Number(listing.priceSellAed ?? 0);
-    const commissionRatePct = Number(listing.commissionRatePct ?? 0);
-    const expected = Number(((saleAmountAed * commissionRatePct) / 100).toFixed(2));
-    return acc + expected;
-  }, 0);
-
-  const totalRevenueAed = Number(
-    (
-      Number(salePayments._sum.amountAed ?? 0) +
-      Number(rentalPayments._sum.amountAed ?? 0) +
-      Number(promotionPayments._sum.amountAed ?? 0) +
-      missingCommissionRevenue +
-      soldListingFallbackRevenue
-    ).toFixed(2)
-  );
-
-  const activityRows = [
-    ...recentUsers.map((user: any) => ({
-      id: `register-${user.id}-${user.createdAt.toISOString()}`,
+  const recentActivity = [
+    ...recentUsers.map((item: (typeof recentUsers)[number]) => ({
+      id: `user-${item.id}`,
       type: "USER_REGISTERED",
-      title: "User registered",
-      description: `${user.fullName?.trim() || user.email || "User"} created a new account`,
-      createdAt: user.createdAt.toISOString(),
+      title: `${item.fullName?.trim() || item.email || "New user"} joined`,
+      description: item.email || "New account registration",
+      createdAt: item.createdAt.toISOString(),
     })),
-    ...recentLogoutEvents
-      .filter((event: any) => {
-        const metadata = (event.metadata ?? {}) as Record<string, unknown>;
-        return String(metadata.activityType ?? "") === "USER_LOGOUT";
-      })
-      .map((event: any) => ({
-        id: `logout-${event.id}`,
-        type: "USER_LOGOUT",
-        title: "User logged out",
-        description: `${event.actor?.fullName?.trim() || event.actor?.email || "User"} logged out`,
-        createdAt: event.createdAt.toISOString(),
-      })),
-    ...recentPostedListings.map((listing: any) => ({
-      id: `listing-${listing.id}-${listing.createdAt.toISOString()}`,
+    ...recentPostedListings.map((item: (typeof recentPostedListings)[number]) => ({
+      id: `listing-${item.id}`,
       type: "LISTING_POSTED",
-      title: "Listing posted",
-      description: `${listing.seller?.fullName?.trim() || listing.seller?.email || "Seller"} posted ${buildListingTitle(listing)}`,
-      createdAt: listing.createdAt.toISOString(),
+      title: `${item.seller?.fullName?.trim() || item.seller?.email || "Seller"} posted a listing`,
+      description: buildListingTitle(item),
+      createdAt: item.createdAt.toISOString(),
     })),
-    ...recentAcceptedOffers.map((offer: any) => ({
-      id: `sale-${offer.id}-${offer.updatedAt.toISOString()}`,
+    ...recentAcceptedOffers.map((item: (typeof recentAcceptedOffers)[number]) => ({
+      id: `offer-${item.id}`,
       type: "BUYING_COMPLETED",
-      title: "Buying completed",
-      description: `${offer.group?.name || "A buyer group"} completed purchase for ${buildListingTitle(offer.listing)}`,
-      createdAt: offer.updatedAt.toISOString(),
+      title: `Offer accepted in ${item.group?.name || "group"}`,
+      description: buildListingTitle(item.listing),
+      createdAt: item.updatedAt.toISOString(),
     })),
-    ...recentSuccessfulRentals.map((rental: any) => ({
-      id: `rental-${rental.id}-${rental.updatedAt.toISOString()}`,
+    ...recentSuccessfulRentals.map((item: (typeof recentSuccessfulRentals)[number]) => ({
+      id: `rental-${item.id}`,
       type: "RENTAL_COMPLETED",
-      title: "Rental confirmed",
-      description: `${rental.renter?.fullName?.trim() || rental.renter?.email || "Renter"} confirmed rental for ${buildListingTitle(rental.listing)}`,
-      createdAt: rental.updatedAt.toISOString(),
+      title: `${item.renter?.fullName?.trim() || item.renter?.email || "Renter"} rental confirmed`,
+      description: buildListingTitle(item.listing),
+      createdAt: item.updatedAt.toISOString(),
     })),
-    ...recentPromotionPayments.map((payment: any) => ({
-      id: `promo-${payment.id}-${payment.createdAt.toISOString()}`,
+    ...recentApprovedBannerAds.map((item: (typeof recentApprovedBannerAds)[number]) => ({
+      id: `promo-approved-${item.id}`,
       type: "PROMOTION_PURCHASED",
-      title: "Promotion purchased",
-      description: `${payment.payer.fullName?.trim() || payment.payer.email || "Seller"} purchased promotion for ${buildListingTitle(payment.promotion?.listing)}`,
-      createdAt: payment.createdAt.toISOString(),
+      title: `${item.seller?.fullName?.trim() || item.seller?.email || "Seller"} promotion approved`,
+      description: buildListingTitle(item.listing),
+      createdAt: (item.reviewedAt ?? item.createdAt).toISOString(),
     })),
-    ...recentActiveBannerAds.map((ad: any) => {
-      const occurredAt = ad.reviewedAt ?? ad.startsAt ?? ad.updatedAt ?? ad.createdAt;
-      return {
-        id: `banner-active-${ad.id}-${occurredAt.toISOString()}`,
-        type: "BANNER_ACTIVATED",
-        title: "Banner activated",
-        description: `${ad.seller?.fullName?.trim() || ad.seller?.email || "Seller"} activated banner for ${buildListingTitle(ad.listing)}`,
-        createdAt: occurredAt.toISOString(),
-      };
-    }),
+    ...recentActiveBannerAds.map((item: (typeof recentActiveBannerAds)[number]) => ({
+      id: `banner-${item.id}`,
+      type: "BANNER_ACTIVATED",
+      title: `${item.seller?.fullName?.trim() || item.seller?.email || "Seller"} activated banner ad`,
+      description: buildListingTitle(item.listing),
+      createdAt: item.updatedAt.toISOString(),
+    })),
   ]
     .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
     .slice(0, 20);
+
+  const revenueAed =
+    Number(salePayments._sum.amountAed ?? 0) +
+    Number(rentalPayments._sum.amountAed ?? 0) +
+    Number(promotionRevenueAgg._sum.packagePriceAed ?? 0);
 
   res.status(200).json({
     users,
     listings,
     pendingVerifications,
-    pendingBadgeQueue,
+    pendingBadgeQueue: pendingVerifications,
     activePromotions,
-    revenueAed: totalRevenueAed,
+    revenueAed: toMoney(revenueAed),
     listingBreakdown: {
       active: activeListings,
+      activeSale: activeSaleListings,
+      activeRent: activeRentListings,
       sold: soldListings,
       draft: draftListings,
     },
@@ -346,99 +228,135 @@ export const getAdminDashboardOverview = async (_req: Request, res: Response) =>
       thirdParty: thirdPartyVerifiedListings,
       pending: pendingVerificationListings,
     },
-    recentActivity: activityRows,
+    recentActivity,
   });
 };
 
 export const getAdminDashboardCharts = async (req: Request, res: Response) => {
   const range = parseDashboardRange(req.query.range);
-  const startDate = getRangeStart(range);
+  const selectedYear = parseDashboardYear(req.query.year, new Date().getFullYear());
+  const buckets = buildRangeBuckets(range, selectedYear);
 
-  const [listingsCreated, usersCreated, verificationSubmitted, payments, events] = await Promise.all([
-    prisma.listing.findMany({ where: { createdAt: { gte: startDate } }, select: { createdAt: true } }),
-    prisma.user.findMany({ where: { createdAt: { gte: startDate } }, select: { createdAt: true } }),
-    prisma.verificationSubmission.findMany({ where: { submittedAt: { gte: startDate } }, select: { submittedAt: true } }),
-    prisma.payment.findMany({ where: { createdAt: { gte: startDate }, status: "PAID" }, select: { createdAt: true, amountAed: true } }),
-    prisma.analyticsEvent.findMany({ where: { createdAt: { gte: startDate } }, select: { createdAt: true, eventType: true } }),
+  const [users, activeListings, activeRentalListings, activeRentals, inquiries, payments, bannerAds] = await Promise.all([
+    prisma.user.findMany({ where: { createdAt: { gte: buckets.start, lt: buckets.end } }, select: { createdAt: true } }),
+    prisma.listing.findMany({
+      where: {
+        status: "ACTIVE",
+        listingType: "SELL",
+        OR: [{ createdAt: { gte: buckets.start, lt: buckets.end } }, { publishedAt: { gte: buckets.start, lt: buckets.end } }],
+      },
+      select: { createdAt: true, publishedAt: true },
+    }),
+    prisma.listing.findMany({
+      where: {
+        status: "ACTIVE",
+        listingType: "RENT",
+        OR: [{ createdAt: { gte: buckets.start, lt: buckets.end } }, { publishedAt: { gte: buckets.start, lt: buckets.end } }],
+      },
+      select: { createdAt: true, publishedAt: true },
+    }),
+    prisma.rentalBooking.findMany({
+      where: { status: "ACTIVE", updatedAt: { gte: buckets.start, lt: buckets.end } },
+      select: { updatedAt: true },
+    }),
+    prisma.analyticsEvent.findMany({ where: { eventType: "LISTING_INQUIRY", createdAt: { gte: buckets.start, lt: buckets.end } }, select: { createdAt: true } }),
+    prisma.payment.findMany({
+      where: {
+        status: "PAID",
+        OR: [
+          { paidAt: { gte: buckets.start, lt: buckets.end } },
+          { AND: [{ paidAt: null }, { updatedAt: { gte: buckets.start, lt: buckets.end } }] },
+          { AND: [{ paidAt: null }, { updatedAt: null }, { createdAt: { gte: buckets.start, lt: buckets.end } }] },
+        ],
+        purpose: { in: ["LISTING_FEE", "COMMISSION", "RENTAL"] },
+      },
+      select: { createdAt: true, updatedAt: true, paidAt: true, amountAed: true, purpose: true },
+    }),
+    prisma.bannerAd.findMany({
+      where: {
+        status: { in: monetizedBannerStatuses },
+        OR: [
+          { reviewedAt: { gte: buckets.start, lt: buckets.end } },
+          { updatedAt: { gte: buckets.start, lt: buckets.end } },
+          { createdAt: { gte: buckets.start, lt: buckets.end } },
+        ],
+      },
+      select: { reviewedAt: true, updatedAt: true, createdAt: true, packagePriceAed: true },
+    }),
   ]);
 
-  const buckets = {
-    listings: buildDayBuckets(range),
-    users: buildDayBuckets(range),
-    verifications: buildDayBuckets(range),
-    revenue: buildDayBuckets(range),
-    inquiries: buildDayBuckets(range),
-  };
+  const activeListingsSeries = new Map(buckets.map);
+  const usersSeries = new Map(buckets.map);
+  const activeRentalsSeries = new Map(buckets.map);
+  const inquiriesSeries = new Map(buckets.map);
+  const revenueSeries = new Map(buckets.map);
 
-  for (const row of listingsCreated) {
-    const key = makeDayKey(row.createdAt);
-    if (buckets.listings.map.has(key)) buckets.listings.map.set(key, (buckets.listings.map.get(key) ?? 0) + 1);
+  for (const item of activeListings) {
+    const key = buckets.keyFn(item.publishedAt ?? item.createdAt);
+    if (activeListingsSeries.has(key)) activeListingsSeries.set(key, (activeListingsSeries.get(key) ?? 0) + 1);
   }
-
-  for (const row of usersCreated) {
-    const key = makeDayKey(row.createdAt);
-    if (buckets.users.map.has(key)) buckets.users.map.set(key, (buckets.users.map.get(key) ?? 0) + 1);
+  for (const item of users) {
+    const key = buckets.keyFn(item.createdAt);
+    if (usersSeries.has(key)) usersSeries.set(key, (usersSeries.get(key) ?? 0) + 1);
   }
-
-  for (const row of verificationSubmitted) {
-    const key = makeDayKey(row.submittedAt);
-    if (buckets.verifications.map.has(key)) buckets.verifications.map.set(key, (buckets.verifications.map.get(key) ?? 0) + 1);
+  for (const item of activeRentalListings) {
+    const key = buckets.keyFn(item.publishedAt ?? item.createdAt);
+    if (activeRentalsSeries.has(key)) activeRentalsSeries.set(key, (activeRentalsSeries.get(key) ?? 0) + 1);
   }
-
-  for (const row of payments) {
-    const key = makeDayKey(row.createdAt);
-    if (buckets.revenue.map.has(key)) {
-      const current = buckets.revenue.map.get(key) ?? 0;
-      buckets.revenue.map.set(key, current + Number(row.amountAed));
+  for (const item of activeRentals) {
+    const key = buckets.keyFn(item.updatedAt);
+    if (activeRentalsSeries.has(key)) activeRentalsSeries.set(key, (activeRentalsSeries.get(key) ?? 0) + 1);
+  }
+  for (const item of inquiries) {
+    const key = buckets.keyFn(item.createdAt);
+    if (inquiriesSeries.has(key)) inquiriesSeries.set(key, (inquiriesSeries.get(key) ?? 0) + 1);
+  }
+  for (const item of payments) {
+    const key = buckets.keyFn(getPaidRevenueOccurredAt(item));
+    if (revenueSeries.has(key)) {
+      revenueSeries.set(key, toMoney((revenueSeries.get(key) ?? 0) + Number(item.amountAed ?? 0)));
     }
   }
 
-  for (const row of events) {
-    if (row.eventType !== "LISTING_INQUIRY") continue;
-    const key = makeDayKey(row.createdAt);
-    if (buckets.inquiries.map.has(key)) buckets.inquiries.map.set(key, (buckets.inquiries.map.get(key) ?? 0) + 1);
+  for (const item of bannerAds) {
+    const occurredAt = item.reviewedAt ?? item.updatedAt ?? item.createdAt;
+    const key = buckets.keyFn(occurredAt);
+    if (revenueSeries.has(key)) {
+      revenueSeries.set(key, toMoney((revenueSeries.get(key) ?? 0) + Number(item.packagePriceAed ?? 0)));
+    }
   }
+
+  const bucketKeys = Array.from(buckets.map.keys());
+  const labels =
+    buckets.granularity === "month"
+      ? buckets.labels.map((key) => {
+          const [year, month] = key.split("-").map(Number);
+          return new Date(year, (month ?? 1) - 1, 1).toLocaleDateString("en-US", { month: "short" });
+        })
+      : buckets.labels;
 
   res.status(200).json({
     range,
-    labels: buckets.listings.labels,
+    year: selectedYear,
+    labels,
     series: {
-      listings: buckets.listings.labels.map((k) => buckets.listings.map.get(k) ?? 0),
-      users: buckets.users.labels.map((k) => buckets.users.map.get(k) ?? 0),
-      verifications: buckets.verifications.labels.map((k) => buckets.verifications.map.get(k) ?? 0),
-      listingInquiries: buckets.inquiries.labels.map((k) => buckets.inquiries.map.get(k) ?? 0),
-      revenueAed: buckets.revenue.labels.map((k) => Number((buckets.revenue.map.get(k) ?? 0).toFixed(2))),
+      activeListings: bucketKeys.map((key) => activeListingsSeries.get(key) ?? 0),
+      users: bucketKeys.map((key) => usersSeries.get(key) ?? 0),
+      activeRentals: bucketKeys.map((key) => activeRentalsSeries.get(key) ?? 0),
+      listingInquiries: bucketKeys.map((key) => inquiriesSeries.get(key) ?? 0),
+      revenueAed: bucketKeys.map((key) => toMoney(revenueSeries.get(key) ?? 0)),
     },
   });
 };
 
 export const getAdminModerationQueue = async (_req: Request, res: Response) => {
   const [verificationQueue, promotionQueue, flaggedListings] = await Promise.all([
-    prisma.verificationSubmission.findMany({
-      where: { status: "PENDING" },
-      include: { user: true, documents: true },
-      take: 20,
-      orderBy: { submittedAt: "desc" },
-    }),
-    prisma.promotionCampaign.findMany({
-      where: { status: { in: ["DRAFT", "PENDING_PAYMENT"] } },
-      include: { creator: true, listing: true },
-      take: 20,
-      orderBy: { createdAt: "desc" },
-    }),
-    prisma.analyticsEvent.findMany({
-      where: { eventType: "LISTING_INQUIRY" },
-      include: { listing: true },
-      take: 20,
-      orderBy: { createdAt: "desc" },
-    }),
+    prisma.verificationSubmission.findMany({ where: { status: "PENDING" }, include: { user: true, documents: true }, take: 20, orderBy: { submittedAt: "desc" } }),
+    prisma.promotionCampaign.findMany({ where: { status: { in: ["DRAFT", "PENDING_PAYMENT"] } }, include: { creator: true, listing: true }, take: 20, orderBy: { createdAt: "desc" } }),
+    prisma.analyticsEvent.findMany({ where: { eventType: "LISTING_INQUIRY" }, include: { listing: true }, take: 20, orderBy: { createdAt: "desc" } }),
   ]);
 
-  res.status(200).json({
-    verificationQueue,
-    promotionQueue,
-    flaggedListings,
-  });
+  res.status(200).json({ verificationQueue, promotionQueue, flaggedListings });
 };
 
 export const getAdminFeeSettings = async (_req: Request, res: Response) => {
@@ -455,37 +373,63 @@ export const updateAdminFeeSettings = async (req: AuthedRequest, res: Response) 
       hybridCommissionPct: z.number().min(0).max(100).optional(),
       hybridListingFeeAed: z.number().min(0).max(100).optional(),
     })
-    .refine((value) => Object.values(value).some((item) => item !== undefined), {
-      message: "At least one fee field must be provided",
-    })
+    .refine((value) => Object.values(value).some((item) => item !== undefined), { message: "At least one fee field must be provided" })
     .parse(req.body);
 
   const current = mapPlatformFeeSettings(await ensurePlatformFeeSettings());
-
   const nextSaleCommission = payload.saleCommissionPct ?? current.saleCommissionPct;
   const nextListingFeePct = payload.listingFeePct ?? current.listingFeePct;
 
   if (nextListingFeePct >= nextSaleCommission) {
-    res.status(400).json({
-      message: "Listing fee percentage must be cheaper than sale commission percentage",
-    });
+    res.status(400).json({ message: "Listing fee percentage must be cheaper than sale commission percentage" });
     return;
   }
 
   const updated = await updatePlatformFeeSettings(payload, req.authUser?.id);
-
   res.status(200).json(mapPlatformFeeSettings(updated));
 };
 
-export const getAdminRevenueOverview = async (_req: Request, res: Response) => {
-  const buckets = buildMonthBuckets(12);
+export const getAdminRevenueOverview = async (req: Request, res: Response) => {
+  const { page, limit, skip } = parsePageLimit(req.query, { page: 1, limit: 5, maxLimit: 50 });
+  const range = parseDashboardRange(req.query.range);
+  const selectedYear = parseDashboardYear(req.query.year, new Date().getFullYear());
 
-  const [payments, bannerAds, acceptedOffersWithoutCommissionInvoice, soldListingsWithoutAcceptedOffer] = await Promise.all([
+  let bucketMap = new Map<string, number>();
+  let bucketKeys: string[] = [];
+  let startDate = getRangeStart(range);
+  let endDate = new Date();
+  let toBucketKey = (date: Date) => makeDayKey(date);
+
+  if (range === "1Y") {
+    const yearlyBuckets = buildRangeBuckets("1Y", selectedYear);
+    bucketMap = yearlyBuckets.map;
+    bucketKeys = Array.from(yearlyBuckets.map.keys());
+    startDate = yearlyBuckets.start;
+    endDate = yearlyBuckets.end;
+    toBucketKey = yearlyBuckets.keyFn;
+  } else {
+    const dayBuckets = buildDayBuckets(range);
+    bucketMap = dayBuckets.map;
+    bucketKeys = dayBuckets.labels;
+  }
+
+  const toLabel = (key: string) => {
+    if (range === "1Y") {
+      const [year, month] = key.split("-").map(Number);
+      return new Date(year, (month ?? 1) - 1, 1).toLocaleDateString("en-US", { month: "short" });
+    }
+
+    const d = new Date(key);
+    if (Number.isNaN(d.getTime())) return key;
+    return d.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+  };
+
+  const [payments, bannerAds] = await Promise.all([
     prisma.payment.findMany({
       where: {
         status: { in: ["PAID", "PENDING"] },
-        createdAt: { gte: buckets.startDate },
-        purpose: { in: ["RENTAL", "LISTING_FEE", "COMMISSION", "PROMOTION"] },
+        createdAt: { gte: startDate, lt: endDate },
+        purpose: { in: ["RENTAL", "LISTING_FEE", "COMMISSION"] },
       },
       include: {
         rental: {
@@ -514,29 +458,17 @@ export const getAdminRevenueOverview = async (_req: Request, res: Response) => {
             },
           },
         },
-        promotion: {
-          include: {
-            listing: {
-              include: {
-                seller: {
-                  select: {
-                    fullName: true,
-                  },
-                },
-              },
-            },
-          },
-        },
       },
       orderBy: { createdAt: "desc" },
     }),
     prisma.bannerAd.findMany({
       where: {
-        status: { in: ["ACTIVE", "EXPIRED"] },
+        status: { in: monetizedBannerStatuses },
         OR: [
-          { reviewedAt: { gte: buckets.startDate } },
-          { startsAt: { gte: buckets.startDate } },
-          { createdAt: { gte: buckets.startDate } },
+          { reviewedAt: { gte: startDate, lt: endDate } },
+          { updatedAt: { gte: startDate, lt: endDate } },
+          { startsAt: { gte: startDate, lt: endDate } },
+          { createdAt: { gte: startDate, lt: endDate } },
         ],
       },
       include: {
@@ -557,57 +489,11 @@ export const getAdminRevenueOverview = async (_req: Request, res: Response) => {
       },
       orderBy: { createdAt: "desc" },
     }),
-    prisma.jointOffer.findMany({
-      where: {
-        status: "ACCEPTED",
-        updatedAt: { gte: buckets.startDate },
-        listing: {
-          paymentModel: { in: ["commission", "hybrid"] },
-        },
-        payments: {
-          none: {
-            purpose: "COMMISSION",
-          },
-        },
-      },
-      include: {
-        listing: {
-          include: {
-            seller: {
-              select: {
-                fullName: true,
-              },
-            },
-          },
-        },
-      },
-      orderBy: { updatedAt: "desc" },
-    }),
-    prisma.listing.findMany({
-      where: {
-        status: "SOLD",
-        updatedAt: { gte: buckets.startDate },
-        paymentModel: { in: ["commission", "hybrid"] },
-        offers: {
-          none: {
-            status: "ACCEPTED",
-          },
-        },
-      },
-      include: {
-        seller: {
-          select: {
-            fullName: true,
-          },
-        },
-      },
-      orderBy: { updatedAt: "desc" },
-    }),
   ]);
 
-  const saleSeries = new Map(buckets.map);
-  const rentalSeries = new Map(buckets.map);
-  const adsSeries = new Map(buckets.map);
+  const saleSeries = new Map(bucketMap);
+  const rentalSeries = new Map(bucketMap);
+  const adsSeries = new Map(bucketMap);
 
   const transactions: Array<{
     id: string;
@@ -621,9 +507,10 @@ export const getAdminRevenueOverview = async (_req: Request, res: Response) => {
   }> = [];
 
   for (const payment of payments) {
-    const key = makeMonthKey(payment.createdAt);
+    const occurredAt = getPaidRevenueOccurredAt(payment);
+    const key = toBucketKey(occurredAt);
     const fee = toMoney(payment.amountAed);
-    const listing = payment.rental?.listing ?? payment.offer?.listing ?? payment.promotion?.listing ?? null;
+    const listing = payment.rental?.listing ?? payment.offer?.listing ?? null;
     const sellerName =
       listing?.seller?.fullName?.trim() ||
       "Unknown Seller";
@@ -641,22 +528,7 @@ export const getAdminRevenueOverview = async (_req: Request, res: Response) => {
         feeAed: fee,
         seller: sellerName,
         vehicle: vehicleName,
-        createdAt: payment.createdAt.toISOString(),
-      });
-      continue;
-    }
-
-    if (payment.purpose === "PROMOTION") {
-      if (adsSeries.has(key)) adsSeries.set(key, (adsSeries.get(key) ?? 0) + fee);
-      transactions.push({
-        id: payment.id,
-        source: "PAYMENT",
-        type: "ads",
-        amountAed: fee,
-        feeAed: fee,
-        seller: sellerName,
-        vehicle: vehicleName,
-        createdAt: payment.createdAt.toISOString(),
+        createdAt: occurredAt.toISOString(),
       });
       continue;
     }
@@ -671,14 +543,14 @@ export const getAdminRevenueOverview = async (_req: Request, res: Response) => {
         feeAed: fee,
         seller: sellerName,
         vehicle: vehicleName,
-        createdAt: payment.createdAt.toISOString(),
+        createdAt: occurredAt.toISOString(),
       });
     }
   }
 
   for (const ad of bannerAds) {
-    const occurredAt = ad.reviewedAt ?? ad.startsAt ?? ad.createdAt;
-    const key = makeMonthKey(occurredAt);
+    const occurredAt = ad.reviewedAt ?? ad.startsAt ?? ad.updatedAt ?? ad.createdAt;
+    const key = toBucketKey(occurredAt);
     const fee = toMoney(ad.packagePriceAed);
 
     if (adsSeries.has(key)) adsSeries.set(key, (adsSeries.get(key) ?? 0) + fee);
@@ -699,61 +571,22 @@ export const getAdminRevenueOverview = async (_req: Request, res: Response) => {
     });
   }
 
-  for (const offer of acceptedOffersWithoutCommissionInvoice) {
-    const occurredAt = offer.updatedAt;
-    const key = makeMonthKey(occurredAt);
-    const saleAmountAed = toMoney(offer.offerPriceAed);
-    const commissionRatePct = Number(offer.listing.commissionRatePct ?? 0);
-    const fee = toMoney((saleAmountAed * commissionRatePct) / 100);
-
-    if (saleSeries.has(key)) saleSeries.set(key, (saleSeries.get(key) ?? 0) + fee);
-
-    transactions.push({
-      id: `accepted-offer-${offer.id}`,
-      source: "PAYMENT",
-      type: "sale",
-      amountAed: fee,
-      feeAed: fee,
-      seller: offer.listing.seller.fullName?.trim() || "Unknown Seller",
-      vehicle: buildListingTitle(offer.listing),
-      createdAt: occurredAt.toISOString(),
-    });
-  }
-
-  for (const listing of soldListingsWithoutAcceptedOffer) {
-    const occurredAt = listing.updatedAt;
-    const key = makeMonthKey(occurredAt);
-    const saleAmountAed = toMoney(listing.priceSellAed);
-    const commissionRatePct = Number(listing.commissionRatePct ?? 0);
-    const fee = toMoney((saleAmountAed * commissionRatePct) / 100);
-
-    if (saleSeries.has(key)) saleSeries.set(key, (saleSeries.get(key) ?? 0) + fee);
-
-    transactions.push({
-      id: `sold-listing-${listing.id}`,
-      source: "PAYMENT",
-      type: "sale",
-      amountAed: fee,
-      feeAed: fee,
-      seller: listing.seller.fullName?.trim() || "Unknown Seller",
-      vehicle: buildListingTitle(listing),
-      createdAt: occurredAt.toISOString(),
-    });
-  }
-
-  const saleAed = buckets.keys.map((key) => toMoney(saleSeries.get(key) ?? 0));
-  const rentalAed = buckets.keys.map((key) => toMoney(rentalSeries.get(key) ?? 0));
-  const adsAed = buckets.keys.map((key) => toMoney(adsSeries.get(key) ?? 0));
-  const totalAed = buckets.keys.map((_, idx) => toMoney(saleAed[idx] + rentalAed[idx] + adsAed[idx]));
+  const saleAed = bucketKeys.map((key) => toMoney(saleSeries.get(key) ?? 0));
+  const rentalAed = bucketKeys.map((key) => toMoney(rentalSeries.get(key) ?? 0));
+  const adsAed = bucketKeys.map((key) => toMoney(adsSeries.get(key) ?? 0));
+  const totalAed = bucketKeys.map((_, idx) => toMoney(saleAed[idx] + rentalAed[idx] + adsAed[idx]));
 
   const revenueTransactions = transactions
-    .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
-    .slice(0, 50);
+    .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+
+  const pagedTransactions = revenueTransactions.slice(skip, skip + limit);
 
   const sum = (values: number[]) => values.reduce((acc, current) => acc + current, 0);
 
   res.status(200).json({
-    labels: buckets.labels,
+    range,
+    year: selectedYear,
+    labels: bucketKeys.map(toLabel),
     series: {
       saleAed,
       rentalAed,
@@ -767,47 +600,172 @@ export const getAdminRevenueOverview = async (_req: Request, res: Response) => {
       adsRevenueAed: toMoney(sum(adsAed)),
       totalTransactions: revenueTransactions.length,
     },
-    transactions: revenueTransactions,
+    transactions: pagedTransactions,
+    transactionsPagination: {
+      page,
+      limit,
+      total: revenueTransactions.length,
+      hasMore: skip + pagedTransactions.length < revenueTransactions.length,
+    },
   });
 };
 
-export const getAdminCommissionTracking = async (_req: Request, res: Response) => {
-  const payments = await prisma.payment.findMany({
+export const getAdminCommissionTracking = async (req: Request, res: Response) => {
+  const { page, limit, skip } = parsePageLimit(req.query, { page: 1, limit: 5, maxLimit: 50 });
+
+  const feeSettings = mapPlatformFeeSettings(await ensurePlatformFeeSettings());
+  const rentalFeePct = Number(feeSettings.rentalFeePct ?? 0);
+
+  const rentalBookings = await prisma.rentalBooking.findMany({
     where: {
-      purpose: {
-        in: ["LISTING_FEE", "COMMISSION"],
-      },
+      status: { in: ["APPROVED", "ACTIVE", "COMPLETED"] },
     },
-    include: {
-      payer: {
+    select: {
+      id: true,
+      subtotalAed: true,
+      listing: {
         select: {
-          id: true,
-          fullName: true,
-          email: true,
+          sellerId: true,
         },
       },
-      offer: {
+    },
+  });
+
+  const rentalIds = rentalBookings.map((booking: (typeof rentalBookings)[number]) => booking.id);
+  const existingRentalPayments = rentalIds.length
+    ? await prisma.payment.findMany({
+        where: {
+          purpose: "RENTAL",
+          rentalId: { in: rentalIds },
+        },
         select: {
-          id: true,
-          offerPriceAed: true,
-          listing: {
-            select: {
-              id: true,
-              make: true,
-              model: true,
-              year: true,
-              paymentModel: true,
-              commissionRatePct: true,
-              priceSellAed: true,
+          rentalId: true,
+        },
+      })
+    : [];
+
+  const existingRentalPaymentIds = new Set(
+    existingRentalPayments.map((payment: (typeof existingRentalPayments)[number]) => payment.rentalId).filter(Boolean)
+  );
+
+  const missingRentalRows = rentalBookings
+    .filter((booking: (typeof rentalBookings)[number]) => !existingRentalPaymentIds.has(booking.id))
+    .map((booking: (typeof rentalBookings)[number]) => {
+      const baseAmountAed = Number(booking.subtotalAed ?? 0);
+      const expectedRentalFeeAed = Number(((baseAmountAed * rentalFeePct) / 100).toFixed(2));
+      if (expectedRentalFeeAed <= 0) return null;
+
+      return {
+        payerId: booking.listing.sellerId,
+        purpose: "RENTAL" as const,
+        status: "PENDING" as const,
+        amountAed: expectedRentalFeeAed,
+        currency: "AED",
+        provider: "MANUAL_ADMIN_REVIEW",
+        providerPaymentRef: `RENTAL:${booking.id}:FEE`,
+        rentalId: booking.id,
+      };
+    })
+    .filter(Boolean) as Array<{
+    payerId: string;
+    purpose: "RENTAL";
+    status: "PENDING";
+    amountAed: number;
+    currency: string;
+    provider: string;
+    providerPaymentRef: string;
+    rentalId: string;
+  }>;
+
+  if (missingRentalRows.length > 0) {
+    await prisma.payment.createMany({ data: missingRentalRows });
+  }
+
+  const [payments, totalInvoices, paidInvoicesAgg, unpaidInvoicesAgg] = await Promise.all([
+    prisma.payment.findMany({
+      where: {
+        purpose: {
+          in: ["LISTING_FEE", "COMMISSION", "RENTAL"],
+        },
+      },
+      include: {
+        payer: {
+          select: {
+            id: true,
+            fullName: true,
+            email: true,
+          },
+        },
+        offer: {
+          select: {
+            id: true,
+            offerPriceAed: true,
+            listing: {
+              select: {
+                id: true,
+                make: true,
+                model: true,
+                year: true,
+                paymentModel: true,
+                commissionRatePct: true,
+                priceSellAed: true,
+              },
+            },
+          },
+        },
+        rental: {
+          select: {
+            id: true,
+            subtotalAed: true,
+            totalAed: true,
+            listing: {
+              select: {
+                id: true,
+                make: true,
+                model: true,
+                year: true,
+                paymentModel: true,
+              },
             },
           },
         },
       },
-    },
-    orderBy: {
-      createdAt: "desc",
-    },
-  });
+      orderBy: {
+        createdAt: "desc",
+      },
+      skip,
+      take: limit,
+    }),
+    prisma.payment.count({
+      where: {
+        purpose: {
+          in: ["LISTING_FEE", "COMMISSION", "RENTAL"],
+        },
+      },
+    }),
+    prisma.payment.aggregate({
+      where: {
+        purpose: {
+          in: ["LISTING_FEE", "COMMISSION", "RENTAL"],
+        },
+        status: "PAID",
+      },
+      _count: { _all: true },
+      _sum: { amountAed: true },
+    }),
+    prisma.payment.aggregate({
+      where: {
+        purpose: {
+          in: ["LISTING_FEE", "COMMISSION", "RENTAL"],
+        },
+        status: { not: "PAID" },
+      },
+      _count: { _all: true },
+      _sum: { amountAed: true },
+    }),
+  ]);
+
+  const totalExpectedOnPage = payments.reduce((acc: number, payment: (typeof payments)[number]) => acc + Number(payment.amountAed ?? 0), 0);
 
   const listingIdsFromPaymentRef = Array.from(
     new Set(
@@ -850,9 +808,18 @@ export const getAdminCommissionTracking = async (_req: Request, res: Response) =
       return match?.[1] ?? null;
     })();
     const listingFromRef = listingFromRefId ? listingRefMap.get(listingFromRefId) : null;
-    const listing = listingFromOffer ?? listingFromRef;
-    const saleAmountAed = toMoney(payment.offer?.offerPriceAed ?? Number((listingFromRef as { priceSellAed?: unknown } | null)?.priceSellAed ?? 0));
-    const commissionRatePct = payment.purpose === "COMMISSION" ? toMoney(listingFromOffer?.commissionRatePct ?? 0) : 0;
+    const listingFromRental = payment.rental?.listing;
+    const listing = listingFromOffer ?? listingFromRef ?? listingFromRental;
+    const saleAmountAed =
+      payment.purpose === "RENTAL"
+        ? toMoney(payment.rental?.subtotalAed ?? payment.rental?.totalAed ?? 0)
+        : toMoney(payment.offer?.offerPriceAed ?? Number((listingFromRef as { priceSellAed?: unknown } | null)?.priceSellAed ?? 0));
+    const commissionRatePct =
+      payment.purpose === "COMMISSION"
+        ? toMoney(listingFromOffer?.commissionRatePct ?? 0)
+        : payment.purpose === "RENTAL"
+          ? toMoney(rentalFeePct)
+          : 0;
     const transferMeta = parseTransferMetaFromPaymentRef(payment.providerPaymentRef);
     const transferStatus =
       payment.status === "PAID"
@@ -894,18 +861,24 @@ export const getAdminCommissionTracking = async (_req: Request, res: Response) =
   });
 
   const summary = {
-    totalInvoices: items.length,
-    paidInvoices: items.filter((item: (typeof items)[number]) => item.status === "PAID").length,
-    unpaidInvoices: items.filter((item: (typeof items)[number]) => item.status === "UNPAID").length,
-    totalExpectedCommissionAed: toMoney(
-      items.reduce((acc: number, item: (typeof items)[number]) => acc + item.expectedCommissionAed, 0)
-    ),
-    totalPaidCommissionAed: toMoney(
-      items.reduce((acc: number, item: (typeof items)[number]) => acc + item.paidAmountAed, 0)
-    ),
+    totalInvoices,
+    paidInvoices: Number(paidInvoicesAgg._count._all ?? 0),
+    unpaidInvoices: Number(unpaidInvoicesAgg._count._all ?? 0),
+    totalExpectedCommissionAed: toMoney(Number(paidInvoicesAgg._sum.amountAed ?? 0) + Number(unpaidInvoicesAgg._sum.amountAed ?? 0)),
+    totalPaidCommissionAed: toMoney(paidInvoicesAgg._sum.amountAed),
+    pageExpectedCommissionAed: toMoney(totalExpectedOnPage),
   };
 
-  res.status(200).json({ items, summary });
+  res.status(200).json({
+    items,
+    summary,
+    pagination: {
+      page,
+      limit,
+      total: totalInvoices,
+      hasMore: skip + items.length < totalInvoices,
+    },
+  });
 };
 
 export const confirmAdminFeeInvoice = async (req: AuthedRequest, res: Response) => {
@@ -933,8 +906,8 @@ export const confirmAdminFeeInvoice = async (req: AuthedRequest, res: Response) 
     return;
   }
 
-  if (payment.purpose !== "LISTING_FEE" && payment.purpose !== "COMMISSION") {
-    res.status(400).json({ message: "Only LISTING_FEE or COMMISSION invoices can be confirmed here" });
+  if (payment.purpose !== "LISTING_FEE" && payment.purpose !== "COMMISSION" && payment.purpose !== "RENTAL") {
+    res.status(400).json({ message: "Only LISTING_FEE, COMMISSION, or RENTAL invoices can be confirmed here" });
     return;
   }
 
@@ -963,7 +936,7 @@ export const confirmAdminFeeInvoice = async (req: AuthedRequest, res: Response) 
       type: "SYSTEM",
       priority: "NORMAL",
       title: "Fee payment confirmed",
-      body: `Your ${payment.purpose === "LISTING_FEE" ? "listing fee" : "commission"} invoice has been confirmed by admin.`,
+      body: `Your ${payment.purpose === "LISTING_FEE" ? "listing fee" : payment.purpose === "RENTAL" ? "rental fee" : "commission"} invoice has been confirmed by admin.`,
       link: "/seller-activity",
     },
   });

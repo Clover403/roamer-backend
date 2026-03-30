@@ -7,6 +7,12 @@ import { describe, expect, it, jest } from "@jest/globals";
 const handlers = {
   register: jest.fn((_: any, res: any) => res.status(201).json({ ok: true, action: "register" })),
   login: jest.fn((_: any, res: any) => res.status(200).json({ ok: true, action: "login" })),
+  forgotPassword: jest.fn((_: any, res: any) => res.status(200).json({ ok: true, action: "forgot-password" })),
+  resetPassword: jest.fn((_: any, res: any) => res.status(200).json({ ok: true, action: "reset-password" })),
+  resendEmailVerification: jest.fn((_: any, res: any) => res.status(200).json({ ok: true, action: "resend-email-verification" })),
+  verifyEmail: jest.fn((_: any, res: any) => res.status(200).json({ ok: true, action: "verify-email" })),
+  googleAuthStart: jest.fn((_: any, res: any) => res.status(302).json({ ok: true, action: "google-start" })),
+  googleAuthCallback: jest.fn((_: any, res: any) => res.status(302).json({ ok: true, action: "google-callback" })),
   me: jest.fn((_: any, res: any) => res.status(200).json({ ok: true, action: "me" })),
   logout: jest.fn((_: any, res: any) => res.status(200).json({ ok: true, action: "logout" })),
 };
@@ -30,6 +36,18 @@ describe("Auth route contracts", () => {
     const response = await request(app).post("/auth/login").send({ email: "a@a.com", password: "123456" });
     expect(response.status).toBe(200);
     expect(handlers.login).toHaveBeenCalledTimes(1);
+  });
+
+  it("POST /auth/forgot-password calls forgotPassword controller", async () => {
+    const response = await request(app).post("/auth/forgot-password").send({ email: "a@a.com" });
+    expect(response.status).toBe(200);
+    expect(handlers.forgotPassword).toHaveBeenCalledTimes(1);
+  });
+
+  it("POST /auth/reset-password calls resetPassword controller", async () => {
+    const response = await request(app).post("/auth/reset-password").send({ token: "token", password: "123456" });
+    expect(response.status).toBe(200);
+    expect(handlers.resetPassword).toHaveBeenCalledTimes(1);
   });
 
   it("GET /auth/me calls me controller", async () => {
