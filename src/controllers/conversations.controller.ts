@@ -3,6 +3,7 @@ import type { Prisma } from "@prisma/client";
 import { z } from "zod";
 import { prisma } from "../lib/prisma";
 import { sanitizePlainText } from "../lib/security";
+import { storageService } from "../services/storageService";
 
 const listConversationQuerySchema = z.object({
   userId: z.string().optional(),
@@ -37,6 +38,45 @@ const dedupeGroupConversations = <T extends { id: string; channelType: string; g
     (a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime()
   );
 };
+
+const DEFAULT_SIGNED_URL_EXPIRY_MS = 365 * 24 * 60 * 60 * 1000;
+
+const signAvatarUrl = async (avatarUrl?: string | null) => {
+  if (!avatarUrl) return avatarUrl ?? null;
+  return storageService.getSignedUrl(avatarUrl, DEFAULT_SIGNED_URL_EXPIRY_MS);
+};
+
+const signAttachmentUrl = async (attachmentUrl?: string | null) => {
+  if (!attachmentUrl) return attachmentUrl ?? null;
+  return storageService.getSignedUrl(attachmentUrl, DEFAULT_SIGNED_URL_EXPIRY_MS);
+};
+
+const withSignedConversationAssets = async (conversation: any) => ({
+  ...conversation,
+  participants: await Promise.all(
+    (conversation.participants ?? []).map(async (participant: any) => ({
+      ...participant,
+      user: participant.user
+        ? {
+            ...participant.user,
+            avatarUrl: await signAvatarUrl(participant.user.avatarUrl),
+          }
+        : participant.user,
+    }))
+  ),
+  messages: await Promise.all(
+    (conversation.messages ?? []).map(async (message: any) => ({
+      ...message,
+      attachmentUrl: await signAttachmentUrl(message.attachmentUrl),
+      sender: message.sender
+        ? {
+            ...message.sender,
+            avatarUrl: await signAvatarUrl(message.sender.avatarUrl),
+          }
+        : message.sender,
+    }))
+  ),
+});
 
 export const listConversations = async (req: Request, res: Response) => {
   const query = listConversationQuerySchema.parse(req.query);
@@ -103,7 +143,9 @@ export const listConversations = async (req: Request, res: Response) => {
     return Boolean(item.groupId && item.group);
   });
 
-  res.status(200).json(dedupeGroupConversations(normalizedItems));
+  const deduped = dedupeGroupConversations(normalizedItems);
+  const signed = await Promise.all(deduped.map((item: (typeof deduped)[number]) => withSignedConversationAssets(item)));
+  res.status(200).json(signed);
 };
 
 export const createConversation = async (req: Request, res: Response) => {
@@ -182,7 +224,7 @@ export const createConversation = async (req: Request, res: Response) => {
         },
       });
 
-      res.status(200).json(updated);
+      res.status(200).json(updated ? await withSignedConversationAssets(updated) : updated);
       return;
     }
 
@@ -204,7 +246,7 @@ export const createConversation = async (req: Request, res: Response) => {
       },
     });
 
-    res.status(201).json(conversation);
+    res.status(201).json(await withSignedConversationAssets(conversation));
     return;
   }
 
@@ -246,7 +288,7 @@ export const createConversation = async (req: Request, res: Response) => {
         },
       });
 
-      res.status(200).json(fullConversation);
+      res.status(200).json(fullConversation ? await withSignedConversationAssets(fullConversation) : fullConversation);
       return;
     }
   }
@@ -270,7 +312,7 @@ export const createConversation = async (req: Request, res: Response) => {
     },
   });
 
-  res.status(201).json(conversation);
+  res.status(201).json(await withSignedConversationAssets(conversation));
 };
 
 export const listConversationMessages = async (req: Request<{ id: string }>, res: Response) => {
@@ -281,7 +323,18 @@ export const listConversationMessages = async (req: Request<{ id: string }>, res
     orderBy: { createdAt: "asc" },
   });
 
-  res.status(200).json(messages);
+  const signed = await Promise.all(
+    messages.map(async (message: (typeof messages)[number]) => ({
+      ...message,
+      attachmentUrl: await signAttachmentUrl(message.attachmentUrl),
+      sender: {
+        ...message.sender,
+        avatarUrl: await signAvatarUrl(message.sender.avatarUrl),
+      },
+    }))
+  );
+
+  res.status(200).json(signed);
 };
 
 export const createConversationMessage = async (req: Request<{ id: string }>, res: Response) => {
@@ -330,7 +383,14 @@ export const createConversationMessage = async (req: Request<{ id: string }>, re
     return created;
   });
 
-  res.status(201).json(message);
+  res.status(201).json({
+    ...message,
+    attachmentUrl: await signAttachmentUrl(message.attachmentUrl),
+    sender: {
+      ...message.sender,
+      avatarUrl: await signAvatarUrl(message.sender.avatarUrl),
+    },
+  });
 };
 
 export const markConversationRead = async (req: Request<{ id: string }>, res: Response) => {
@@ -380,54 +440,69 @@ export const uploadConversationMessageMedia = async (
   }
 
   const uploadedFile = req.file;
-
-  const host = req.get("host");
-  const attachmentUrl = `${req.protocol}://${host}/uploads/conversations/${uploadedFile.filename}`;
+  const attachmentPath = await storageService.uploadFile(
+    uploadedFile.buffer,
+    uploadedFile.originalname,
+    "rental",
+    uploadedFile.mimetype
+  );
   const inferredType: "IMAGE" | "FILE" = uploadedFile.mimetype.startsWith("image/") ? "IMAGE" : "FILE";
 
-  const message = await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
-    const created = await tx.message.create({
-      data: {
-        conversationId,
-        senderId,
-        messageType: inferredType,
-        content: content || uploadedFile.originalname || "Attachment",
-        attachmentUrl,
-      },
-      include: {
-        sender: {
-          select: {
-            id: true,
-            fullName: true,
-            avatarUrl: true,
-            role: true,
+  try {
+    const message = await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
+      const created = await tx.message.create({
+        data: {
+          conversationId,
+          senderId,
+          messageType: inferredType,
+          content: content || uploadedFile.originalname || "Attachment",
+          attachmentUrl: attachmentPath,
+        },
+        include: {
+          sender: {
+            select: {
+              id: true,
+              fullName: true,
+              avatarUrl: true,
+              role: true,
+            },
           },
         },
-      },
-    });
+      });
 
-    await tx.conversation.update({
-      where: { id: conversationId },
-      data: { updatedAt: new Date() },
-    });
+      await tx.conversation.update({
+        where: { id: conversationId },
+        data: { updatedAt: new Date() },
+      });
 
-    await tx.conversationParticipant.upsert({
-      where: {
-        conversationId_userId: {
+      await tx.conversationParticipant.upsert({
+        where: {
+          conversationId_userId: {
+            conversationId,
+            userId: senderId,
+          },
+        },
+        update: { lastReadAt: new Date() },
+        create: {
           conversationId,
           userId: senderId,
+          lastReadAt: new Date(),
         },
-      },
-      update: { lastReadAt: new Date() },
-      create: {
-        conversationId,
-        userId: senderId,
-        lastReadAt: new Date(),
-      },
+      });
+
+      return created;
     });
 
-    return created;
-  });
-
-  res.status(201).json(message);
+    res.status(201).json({
+      ...message,
+      attachmentUrl: await signAttachmentUrl(message.attachmentUrl),
+      sender: {
+        ...message.sender,
+        avatarUrl: await signAvatarUrl(message.sender.avatarUrl),
+      },
+    });
+  } catch (error) {
+    await storageService.deleteFile(attachmentPath);
+    throw error;
+  }
 };

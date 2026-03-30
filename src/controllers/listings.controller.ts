@@ -6,6 +6,7 @@ import { parsePagination } from "../routes/utils";
 import { purgeCancelledGroups } from "../lib/group-lifecycle";
 import { getUserVerificationGate } from "../lib/identity-verification";
 import { sanitizePlainText } from "../lib/security";
+import { storageService } from "../services/storageService";
 
 type AuthedRequest = Request & {
   authUser?: {
@@ -191,6 +192,24 @@ const normalizeListingAvailability = (
   return hasActiveRental ? "BOOKED" : "AVAILABLE";
 };
 
+const DEFAULT_SIGNED_URL_EXPIRY_MS = 365 * 24 * 60 * 60 * 1000;
+
+const withSignedMediaUrls = async <T extends { media: Array<{ url: string }> }>(items: T[]): Promise<T[]> => {
+  const allPaths = items.flatMap((item) => item.media.map((media) => media.url));
+  if (allPaths.length === 0) return items;
+
+  const signed = await storageService.getSignedUrls(allPaths);
+  let idx = 0;
+
+  return items.map((item) => ({
+    ...item,
+    media: item.media.map((media) => ({
+      ...media,
+      url: signed[idx++] || media.url,
+    })),
+  }));
+};
+
 export const listListings = async (req: Request, res: Response) => {
   await purgeCancelledGroups(prisma);
 
@@ -275,10 +294,12 @@ export const listListings = async (req: Request, res: Response) => {
     : [];
 
   const activeRentalSet = new Set(activeRentals.map((row: (typeof activeRentals)[number]) => row.listingId));
+  const itemsWithSignedMedia = await withSignedMediaUrls(items);
 
   res.status(200).json({
-    items: items.map((item: (typeof items)[number]) => ({
+    items: items.map((item: (typeof items)[number], index: number) => ({
       ...item,
+      media: itemsWithSignedMedia[index]?.media ?? item.media,
       availabilityStatus: normalizeListingAvailability(item, activeRentalSet.has(item.id)),
       groupsActive: item._count.groups,
     })),
@@ -514,8 +535,10 @@ export const getListingById = async (req: Request<{ id: string }>, res: Response
         )
       : false;
 
+  const [itemWithSignedMedia] = await withSignedMediaUrls([item]);
+
   res.status(200).json({
-    ...item,
+    ...itemWithSignedMedia,
     availabilityStatus: normalizeListingAvailability(item, hasActiveRental),
     groupsActive: item._count.groups,
   });
@@ -904,21 +927,31 @@ export const uploadListingMedia = async (
     return;
   }
 
-  const host = req.get("host");
-  const fileUrl = `${req.protocol}://${host}/uploads/listings/${req.file.filename}`;
+  const filePath = await storageService.uploadFile(
+    req.file.buffer,
+    req.file.originalname,
+    "listings",
+    req.file.mimetype
+  );
 
-  const media = await prisma.listingMedia.create({
-    data: {
-      listingId,
-      mediaType: validMediaType.data,
-      url: fileUrl,
-      sortOrder: Number.isFinite(sortOrder) ? sortOrder : 0,
-      mimeType: req.file.mimetype,
-      fileSizeBytes: req.file.size,
-    },
-  });
+  try {
+    const media = await prisma.listingMedia.create({
+      data: {
+        listingId,
+        mediaType: validMediaType.data,
+        url: filePath,
+        sortOrder: Number.isFinite(sortOrder) ? sortOrder : 0,
+        mimeType: req.file.mimetype,
+        fileSizeBytes: req.file.size,
+      },
+    });
 
-  res.status(201).json(media);
+    const signedUrl = await storageService.getSignedUrl(media.url, DEFAULT_SIGNED_URL_EXPIRY_MS);
+    res.status(201).json({ ...media, url: signedUrl });
+  } catch (error) {
+    await storageService.deleteFile(filePath);
+    throw error;
+  }
 };
 
 export const deleteListingMedia = async (req: Request<{ id: string }>, res: Response) => {

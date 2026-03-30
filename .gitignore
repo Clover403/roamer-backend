@@ -1,6 +1,9 @@
 node_modules
 # Keep environment variables out of version control
 .env
+gcp-service-account.json
+secrets/
+*.service-account.json
 
 /generated/prisma
 dist

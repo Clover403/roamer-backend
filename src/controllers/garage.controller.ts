@@ -2,6 +2,7 @@ import type { Request, Response } from "express";
 import { Prisma } from "@prisma/client";
 import { z } from "zod";
 import { prisma } from "../lib/prisma";
+import { storageService } from "../services/storageService";
 
 type AuthedRequest = Request & {
   authUser?: {
@@ -12,12 +13,16 @@ type AuthedRequest = Request & {
 
 type GarageAssetResponse = {
   id: string;
-  assetType: "SAVED" | "OWNED" | "RENTED";  // 🆕 Add asset type
+  assetType: "OWNED" | "RENTED" | "INACTIVE";
   rentalRequestId?: string | null;
   rentalStatus?: "REQUESTED" | "APPROVED" | "ACTIVE" | null;
   rentalStartsAt?: string | null;
   rentalEndsAt?: string | null;
   rentalStage?: string | null;
+  inactiveReason?: string | null;
+  contractId?: string | null;
+  contractTitle?: string | null;
+  contractDocumentUrl?: string | null;
   isManual: boolean;
   make: string;
   model: string;
@@ -40,6 +45,45 @@ type GarageAssetResponse = {
 };
 
 const MANUAL_ASSET_NOTES = "Created from Add to Garage";
+const DEACTIVATED_ASSET_PREFIX = "DEACTIVATED_ASSET:";
+const DEACTIVATION_REASONS = ["SOLD", "LOST", "GIFTED", "SCRAPPED", "OTHER"] as const;
+
+const deactivateGarageAssetSchema = z.object({
+  reason: z.enum(DEACTIVATION_REASONS),
+  details: z.string().trim().max(120).optional(),
+});
+
+const buildDeactivatedAssetNote = (reason: (typeof DEACTIVATION_REASONS)[number], details?: string) => {
+  if (details) {
+    return `${DEACTIVATED_ASSET_PREFIX}${reason}|${details}`;
+  }
+
+  return `${DEACTIVATED_ASSET_PREFIX}${reason}`;
+};
+
+const parseDeactivatedReason = (notes: string | null | undefined): string | null => {
+  if (!notes?.startsWith(DEACTIVATED_ASSET_PREFIX)) {
+    return null;
+  }
+
+  const payload = notes.slice(DEACTIVATED_ASSET_PREFIX.length).trim();
+  if (!payload) return null;
+
+  const [reason, details] = payload.split("|");
+  const labels: Record<(typeof DEACTIVATION_REASONS)[number], string> = {
+    SOLD: "Sold",
+    LOST: "Lost",
+    GIFTED: "Gifted",
+    SCRAPPED: "Scrapped",
+    OTHER: "Other",
+  };
+
+  const normalizedReason = (reason ?? "").trim().toUpperCase() as (typeof DEACTIVATION_REASONS)[number];
+  const reasonLabel = labels[normalizedReason] ?? "Inactive";
+  const detailLabel = details?.trim();
+
+  return detailLabel ? `${reasonLabel}: ${detailLabel}` : reasonLabel;
+};
 
 const toNumber = (value: unknown): number => {
   if (typeof value === "number") return value;
@@ -225,6 +269,76 @@ export const updateMyGarageAsset = async (req: AuthedRequest, res: Response) => 
   res.status(200).json({ id: existing.id, listingId });
 };
 
+export const deactivateMyGarageAsset = async (req: AuthedRequest, res: Response) => {
+  const userId = req.authUser?.id;
+  const listingId = String(req.params.listingId ?? "").trim();
+
+  if (!userId) {
+    res.status(401).json({ message: "Unauthenticated" });
+    return;
+  }
+
+  if (!listingId) {
+    res.status(400).json({ message: "listingId is required" });
+    return;
+  }
+
+  const payload = deactivateGarageAssetSchema.parse(req.body);
+  const reasonNote = buildDeactivatedAssetNote(payload.reason, payload.details);
+
+  const ownedAsset = await prisma.garageAsset.findFirst({
+    where: {
+      userId,
+      listingId,
+      assetType: "OWNED",
+    },
+    select: {
+      id: true,
+      currentValue: true,
+    },
+  });
+
+  if (!ownedAsset) {
+    res.status(404).json({ message: "Owned garage asset not found" });
+    return;
+  }
+
+  await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
+    await tx.garageAsset.upsert({
+      where: {
+        userId_listingId_assetType: {
+          userId,
+          listingId,
+          assetType: "SAVED",
+        },
+      },
+      create: {
+        userId,
+        listingId,
+        assetType: "SAVED",
+        currentValue: ownedAsset.currentValue,
+        notes: reasonNote,
+      },
+      update: {
+        currentValue: ownedAsset.currentValue,
+        notes: reasonNote,
+      },
+    });
+
+    await tx.garageAsset.delete({
+      where: {
+        id: ownedAsset.id,
+      },
+    });
+  });
+
+  res.status(200).json({
+    listingId,
+    assetType: "INACTIVE",
+    inactiveReason: parseDeactivatedReason(reasonNote),
+  });
+};
+
 export const listMyGarageAssets = async (req: AuthedRequest, res: Response) => {
   const userId = req.authUser?.id;
   const listingIdFilter = typeof req.query.id === "string" ? req.query.id : undefined;
@@ -237,6 +351,23 @@ export const listMyGarageAssets = async (req: AuthedRequest, res: Response) => {
     where: {
       userId,
       assetType: "OWNED",
+      ...(listingIdFilter ? { listingId: listingIdFilter } : {}),
+    },
+    include: {
+      listing: {
+        include: {
+          media: true,
+        },
+      },
+    },
+    orderBy: { addedAt: "desc" },
+  });
+
+  const inactiveAssets = await prisma.garageAsset.findMany({
+    where: {
+      userId,
+      assetType: "SAVED",
+      notes: { startsWith: DEACTIVATED_ASSET_PREFIX },
       ...(listingIdFilter ? { listingId: listingIdFilter } : {}),
     },
     include: {
@@ -308,8 +439,16 @@ export const listMyGarageAssets = async (req: AuthedRequest, res: Response) => {
     }
   }
 
+  const inactiveAssetByListing = new Map<string, (typeof inactiveAssets)[number]>();
+  for (const inactive of inactiveAssets) {
+    if (!inactiveAssetByListing.has(inactive.listingId)) {
+      inactiveAssetByListing.set(inactive.listingId, inactive);
+    }
+  }
+
   const listingIds = new Set<string>([
     ...Array.from(ownedAssetByListing.keys()),
+    ...Array.from(inactiveAssetByListing.keys()),
     ...Array.from(latestAcceptedOfferByListing.keys()),
     ...Array.from(activeRentalByListing.keys()),
   ]);
@@ -329,14 +468,42 @@ export const listMyGarageAssets = async (req: AuthedRequest, res: Response) => {
     latestValueRows.map((row) => [row.listingId, row.latestValue === null ? null : Number(row.latestValue)])
   );
 
+  const contracts = listingIdList.length
+    ? await prisma.contract.findMany({
+        where: {
+          listingId: {
+            in: listingIdList,
+          },
+        },
+        select: {
+          id: true,
+          listingId: true,
+          title: true,
+          documentUrl: true,
+          updatedAt: true,
+        },
+        orderBy: [{ updatedAt: "desc" }],
+      })
+    : [];
+
+  const latestContractByListing = new Map<string, (typeof contracts)[number]>();
+  for (const contract of contracts) {
+    if (!contract.listingId) continue;
+    if (!latestContractByListing.has(contract.listingId)) {
+      latestContractByListing.set(contract.listingId, contract);
+    }
+  }
+
   const dedupedByListing = new Map<string, GarageAssetResponse>();
 
   for (const listingId of listingIds) {
     const owned = ownedAssetByListing.get(listingId);
+    const inactive = inactiveAssetByListing.get(listingId);
     const acceptedOfferRow = latestAcceptedOfferByListing.get(listingId);
     const activeRental = activeRentalByListing.get(listingId);
-    const listing = owned?.listing ?? acceptedOfferRow?.offer.listing ?? activeRental?.listing;
+    const listing = owned?.listing ?? inactive?.listing ?? acceptedOfferRow?.offer.listing ?? activeRental?.listing;
     const acceptedOffer = acceptedOfferRow?.offer;
+    const contract = latestContractByListing.get(listingId);
     if (!listing) continue;
 
     const sortedMedia = [...listing.media].sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0));
@@ -345,8 +512,9 @@ export const listMyGarageAssets = async (req: AuthedRequest, res: Response) => {
       sortedMedia[0]?.url ??
       "https://images.unsplash.com/photo-1606664515524-ed2f786a0bd6?q=80&w=1400&auto=format&fit=crop";
 
-    const isRentalAsset = !owned && !acceptedOfferRow && Boolean(activeRental);
-    const ownershipShare = isRentalAsset ? 0 : acceptedOfferRow ? toNumber(acceptedOfferRow.ownershipShare) : 100;
+    const isInactiveAsset = Boolean(inactive);
+    const isRentalAsset = !isInactiveAsset && !owned && !acceptedOfferRow && Boolean(activeRental);
+    const ownershipShare = isRentalAsset ? 0 : acceptedOfferRow ? toNumber(acceptedOfferRow.ownershipShare) : isInactiveAsset ? 0 : 100;
     const participantContribution = acceptedOfferRow ? toNumber(acceptedOfferRow.contributionAed) : 0;
     const fallbackListingPrice = toNumber(listing.priceSellAed);
     const purchasePrice = isRentalAsset
@@ -355,17 +523,22 @@ export const listMyGarageAssets = async (req: AuthedRequest, res: Response) => {
         ? participantContribution
         : fallbackListingPrice > 0
           ? Math.round((fallbackListingPrice * ownershipShare) / 100)
-          : 0;
+          : toNumber(inactive?.currentValue ?? 0);
 
-    const listingLatestValue = isRentalAsset ? null : latestValueByListing.get(listingId) ?? owned?.currentValue ?? null;
+    const listingLatestValue = isRentalAsset
+      ? null
+      : latestValueByListing.get(listingId) ?? owned?.currentValue ?? inactive?.currentValue ?? null;
     const currentValue = listingLatestValue !== null
       ? Math.round((listingLatestValue * ownershipShare) / 100)
-      : null;
+      : isInactiveAsset
+        ? inactive?.currentValue ?? null
+        : null;
 
     const purchaseDate =
       listing.soldAt?.toISOString() ??
       acceptedOffer?.createdAt?.toISOString() ??
       activeRental?.startDate?.toISOString() ??
+      inactive?.addedAt?.toISOString() ??
       owned?.addedAt?.toISOString() ??
       null;
 
@@ -380,13 +553,17 @@ export const listMyGarageAssets = async (req: AuthedRequest, res: Response) => {
 
     const item: GarageAssetResponse = {
       id: listing.id,
-      assetType: isRentalAsset ? "RENTED" : "OWNED",
+      assetType: isRentalAsset ? "RENTED" : isInactiveAsset ? "INACTIVE" : "OWNED",
       rentalRequestId: activeRental?.id ?? null,
       rentalStatus: activeRental?.status ?? null,
       rentalStartsAt: activeRental?.startDate?.toISOString() ?? null,
       rentalEndsAt: activeRental?.endDate?.toISOString() ?? null,
       rentalStage,
-      isManual: Boolean(owned && owned.notes === MANUAL_ASSET_NOTES),
+      inactiveReason: parseDeactivatedReason(inactive?.notes),
+      contractId: contract?.id ?? null,
+      contractTitle: contract?.title ?? null,
+      contractDocumentUrl: contract?.documentUrl ?? null,
+      isManual: Boolean((owned?.notes ?? inactive?.notes) === MANUAL_ASSET_NOTES),
       make: listing.make ?? "Unknown",
       model: listing.model ?? "Model",
       year: listing.year ?? null,
@@ -421,7 +598,26 @@ export const listMyGarageAssets = async (req: AuthedRequest, res: Response) => {
     return tb - ta;
   });
 
-  res.status(200).json(items);
+  const signedImages = await storageService.getSignedUrls(items.map((item) => item.image));
+  const signedContractUrls = await Promise.all(
+    items.map(async (item) => {
+      if (!item.contractDocumentUrl) return null;
+
+      try {
+        return await storageService.getSignedUrl(item.contractDocumentUrl);
+      } catch {
+        return item.contractDocumentUrl;
+      }
+    })
+  );
+
+  res.status(200).json(
+    items.map((item, index) => ({
+      ...item,
+      image: signedImages[index] || item.image,
+      contractDocumentUrl: signedContractUrls[index] ?? null,
+    }))
+  );
 };
 
 export const updateGarageLatestValue = async (req: AuthedRequest, res: Response) => {

@@ -1,6 +1,7 @@
 import type { Request, Response } from "express";
 import { z } from "zod";
 import { prisma } from "../lib/prisma";
+import { storageService } from "../services/storageService";
 
 type AuthedRequest = Request & {
   authUser?: {
@@ -41,16 +42,24 @@ const reviewSchema = z
     }
   });
 
+const VERIFICATION_SIGNED_URL_EXPIRY_MS = 15 * 60 * 1000;
+
 export const uploadVerificationDocument = async (req: Request & { file?: Express.Multer.File }, res: Response) => {
   if (!req.file) {
     res.status(400).json({ message: "File is required" });
     return;
   }
 
-  const url = `/uploads/verifications/${req.file.filename}`;
+  const filePath = await storageService.uploadFile(
+    req.file.buffer,
+    req.file.originalname,
+    "verification",
+    req.file.mimetype
+  );
 
   res.status(201).json({
-    url,
+    url: filePath,
+    path: filePath,
     mimeType: req.file.mimetype,
     fileSizeBytes: req.file.size,
     originalName: req.file.originalname,
@@ -242,7 +251,71 @@ export const listVerificationSubmissions = async (_req: Request, res: Response) 
     orderBy: { submittedAt: "desc" },
   });
 
-  res.status(200).json(items);
+  const mapped = await Promise.all(
+    items.map(async (item: (typeof items)[number]) => {
+      const signed = await Promise.all(
+        item.documents.map((doc: (typeof item.documents)[number]) =>
+          storageService.getSignedUrl(doc.fileUrl, VERIFICATION_SIGNED_URL_EXPIRY_MS)
+        )
+      );
+
+      return {
+        ...item,
+        documents: item.documents.map((doc: (typeof item.documents)[number], idx: number) => ({
+          ...doc,
+          fileUrl: signed[idx] || doc.fileUrl,
+        })),
+      };
+    })
+  );
+
+  res.status(200).json(mapped);
+};
+
+export const getAdminVerificationUrlsByUser = async (req: Request<{ userId: string }>, res: Response) => {
+  const userId = String(req.params.userId);
+
+  const latestSubmission = await prisma.verificationSubmission.findFirst({
+    where: { userId },
+    orderBy: { submittedAt: "desc" },
+    select: {
+      id: true,
+      status: true,
+      submittedAt: true,
+      reviewedAt: true,
+      reviewerNotes: true,
+      documents: {
+        orderBy: { createdAt: "asc" },
+        select: {
+          id: true,
+          documentType: true,
+          fileUrl: true,
+          mimeType: true,
+          fileSizeBytes: true,
+          createdAt: true,
+        },
+      },
+    },
+  });
+
+  if (!latestSubmission) {
+    res.status(404).json({ message: "Verification submission not found" });
+    return;
+  }
+
+  const signed = await Promise.all(
+    latestSubmission.documents.map((doc: (typeof latestSubmission.documents)[number]) =>
+      storageService.getSignedUrl(doc.fileUrl, VERIFICATION_SIGNED_URL_EXPIRY_MS)
+    )
+  );
+
+  res.status(200).json({
+    ...latestSubmission,
+    documents: latestSubmission.documents.map((doc: (typeof latestSubmission.documents)[number], idx: number) => ({
+      ...doc,
+      fileUrl: signed[idx] || doc.fileUrl,
+    })),
+  });
 };
 
 export const reviewVerificationSubmission = async (req: Request<{ id: string }>, res: Response) => {

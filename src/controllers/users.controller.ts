@@ -5,6 +5,31 @@ import { prisma } from "../lib/prisma";
 import { ensurePlatformFeeSettings, mapPlatformFeeSettings } from "../lib/platform-fees";
 import { parsePagination } from "../routes/utils";
 import { buildDayBuckets, getChangePercent, getRangeStart, makeDayKey, parseDashboardRange, rangeToDays } from "./dashboard.utils";
+import { storageService } from "../services/storageService";
+
+const DEFAULT_SIGNED_URL_EXPIRY_MS = 365 * 24 * 60 * 60 * 1000;
+const VERIFICATION_SIGNED_URL_EXPIRY_MS = 15 * 60 * 1000;
+
+const signAvatar = async (avatarUrl?: string | null) => {
+  if (!avatarUrl) return avatarUrl ?? null;
+  return storageService.getSignedUrl(avatarUrl, DEFAULT_SIGNED_URL_EXPIRY_MS);
+};
+
+const signVerificationDocuments = async <T extends { documents: Array<{ fileUrl: string }> }>(
+  submission: T | null
+): Promise<T | null> => {
+  if (!submission) return null;
+  const signed = await Promise.all(
+    submission.documents.map((doc) => storageService.getSignedUrl(doc.fileUrl, VERIFICATION_SIGNED_URL_EXPIRY_MS))
+  );
+  return {
+    ...submission,
+    documents: submission.documents.map((doc, idx) => ({
+      ...doc,
+      fileUrl: signed[idx] || doc.fileUrl,
+    })),
+  };
+};
 
 const parsePaymentRefBase = (value?: string | null) => String(value ?? "").split("|")[0] ?? "";
 
@@ -146,7 +171,18 @@ export const listUsers = async (req: Request, res: Response) => {
     prisma.user.count({ where }),
   ]);
 
-  res.status(200).json({ items, page, limit, total });
+  const mappedItems = await Promise.all(
+    items.map(async (item: (typeof items)[number]) => ({
+      ...item,
+      avatarUrl: await signAvatar(item.avatarUrl),
+      verificationSubmissions:
+        item.verificationSubmissions.length > 0
+          ? [await signVerificationDocuments(item.verificationSubmissions[0])].filter(Boolean)
+          : [],
+    }))
+  );
+
+  res.status(200).json({ items: mappedItems, page, limit, total });
 };
 
 export const getSellerCommissionInvoices = async (req: Request<{ id: string }>, res: Response) => {
@@ -546,18 +582,33 @@ export const uploadUserAvatar = async (
     return;
   }
 
-  const avatarUrl = `/uploads/avatars/${req.file.filename}`;
-
-  const updated = await prisma.user.update({
+  const current = await prisma.user.findUnique({
     where: { id: userId },
-    data: { avatarUrl },
-    select: {
-      id: true,
-      avatarUrl: true,
-    },
+    select: { avatarUrl: true },
   });
 
-  res.status(200).json(updated);
+  const avatarPath = await storageService.uploadFile(req.file.buffer, req.file.originalname, "profiles/users", req.file.mimetype);
+
+  try {
+    const updated = await prisma.user.update({
+      where: { id: userId },
+      data: { avatarUrl: avatarPath },
+      select: {
+        id: true,
+        avatarUrl: true,
+      },
+    });
+
+    if (current?.avatarUrl && current.avatarUrl !== avatarPath) {
+      await storageService.deleteFile(current.avatarUrl);
+    }
+
+    const signedAvatarUrl = await signAvatar(updated.avatarUrl);
+    res.status(200).json({ ...updated, avatarUrl: signedAvatarUrl });
+  } catch (error) {
+    await storageService.deleteFile(avatarPath);
+    throw error;
+  }
 };
 
 export const getUserById = async (req: Request<{ id: string }>, res: Response) => {
@@ -575,7 +626,10 @@ export const getUserById = async (req: Request<{ id: string }>, res: Response) =
     return;
   }
 
-  res.status(200).json(user);
+  res.status(200).json({
+    ...user,
+    avatarUrl: await signAvatar(user.avatarUrl),
+  });
 };
 
 export const getAdminUserDetail = async (req: Request<{ id: string }>, res: Response) => {
@@ -631,6 +685,8 @@ export const getAdminUserDetail = async (req: Request<{ id: string }>, res: Resp
     return;
   }
 
+  const latestVerificationSubmission = await signVerificationDocuments(user.verificationSubmissions[0] ?? null);
+
   const listingTypeCounts = await prisma.listing.groupBy({
     by: ["listingType"],
     where: {
@@ -650,12 +706,14 @@ export const getAdminUserDetail = async (req: Request<{ id: string }>, res: Resp
 
   res.status(200).json({
     ...user,
+    avatarUrl: await signAvatar(user.avatarUrl),
+    verificationSubmissions: latestVerificationSubmission ? [latestVerificationSubmission] : [],
     listingsSummary: {
       total: user._count.ownedListings,
       sale: saleListings,
       rent: rentListings,
     },
-    latestVerificationSubmission: user.verificationSubmissions[0] ?? null,
+    latestVerificationSubmission,
   });
 };
 

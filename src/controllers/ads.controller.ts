@@ -3,6 +3,7 @@ import { Prisma } from "@prisma/client";
 import { z } from "zod";
 import { prisma } from "../lib/prisma";
 import { getBannerAdPricingSettings, updateBannerAdPricingSettings } from "../lib/ads-pricing";
+import { storageService } from "../services/storageService";
 
 const MAX_ACTIVE_BANNER_SLOTS: Record<"MARKETPLACE" | "RENTAL", number> = {
   MARKETPLACE: 3,
@@ -69,6 +70,36 @@ const buildAdExpiry = (startsAt: Date, packageDays: number) => {
 
   endsAt.setDate(endsAt.getDate() + packageDays);
   return endsAt;
+};
+
+const DEFAULT_SIGNED_URL_EXPIRY_MS = 365 * 24 * 60 * 60 * 1000;
+
+const signBannerAd = async <T extends { bannerImageUrl?: string | null; listing?: { media?: Array<{ url: string }> } | null }>(
+  ad: T
+): Promise<T> => {
+  const bannerImageUrl = ad.bannerImageUrl
+    ? await storageService.getSignedUrl(ad.bannerImageUrl, DEFAULT_SIGNED_URL_EXPIRY_MS)
+    : ad.bannerImageUrl;
+
+  if (!ad.listing?.media) {
+    return {
+      ...ad,
+      bannerImageUrl,
+    };
+  }
+
+  const signedMedia = await storageService.getSignedUrls(ad.listing.media.map((media) => media.url));
+  return {
+    ...ad,
+    bannerImageUrl,
+    listing: {
+      ...ad.listing,
+      media: ad.listing.media.map((media, idx) => ({
+        ...media,
+        url: signedMedia[idx] || media.url,
+      })),
+    },
+  };
 };
 
 export const getBannerAdSlots = async (req: Request, res: Response) => {
@@ -172,7 +203,7 @@ export const listActiveBannerAds = async (req: Request, res: Response) => {
     take: MAX_ACTIVE_BANNER_SLOTS[query.placementTarget],
   });
 
-  res.status(200).json(items);
+  res.status(200).json(await Promise.all(items.map((item: (typeof items)[number]) => signBannerAd(item))));
 };
 
 export const listMyBannerAds = async (req: AuthedRequest, res: Response) => {
@@ -197,7 +228,7 @@ export const listMyBannerAds = async (req: AuthedRequest, res: Response) => {
     orderBy: { createdAt: "desc" },
   });
 
-  res.status(200).json(items);
+  res.status(200).json(await Promise.all(items.map((item: (typeof items)[number]) => signBannerAd(item))));
 };
 
 export const listBannerAdsForAdmin = async (req: AuthedRequest, res: Response) => {
@@ -243,7 +274,7 @@ export const listBannerAdsForAdmin = async (req: AuthedRequest, res: Response) =
     orderBy: [{ createdAt: "desc" }],
   });
 
-  res.status(200).json(items);
+  res.status(200).json(await Promise.all(items.map((item: (typeof items)[number]) => signBannerAd(item))));
 };
 
 export const createBannerAd = async (req: AuthedRequest, res: Response) => {
@@ -400,7 +431,7 @@ export const createBannerAd = async (req: AuthedRequest, res: Response) => {
     });
   }
 
-  res.status(201).json(ad);
+  res.status(201).json(await signBannerAd(ad));
 };
 
 export const adminActivateBannerAd = async (req: AuthedRequest, res: Response) => {
@@ -486,7 +517,7 @@ export const adminActivateBannerAd = async (req: AuthedRequest, res: Response) =
       },
     });
 
-    res.status(200).json(queued);
+    res.status(200).json(await signBannerAd(queued));
     return;
   }
 
@@ -531,7 +562,7 @@ export const adminActivateBannerAd = async (req: AuthedRequest, res: Response) =
     },
   });
 
-  res.status(200).json(updated);
+  res.status(200).json(await signBannerAd(updated));
 };
 
 export const adminRejectBannerAd = async (req: AuthedRequest, res: Response) => {
@@ -582,7 +613,7 @@ export const adminRejectBannerAd = async (req: AuthedRequest, res: Response) => 
     },
   });
 
-  res.status(200).json(updated);
+  res.status(200).json(await signBannerAd(updated));
 };
 
 export const uploadBannerAdImage = async (
@@ -594,14 +625,13 @@ export const uploadBannerAdImage = async (
     return;
   }
 
-  const host = req.get("host");
-  if (!host) {
-    res.status(400).json({ message: "Unable to determine host" });
-    return;
-  }
+  const filePath = await storageService.uploadFile(req.file.buffer, req.file.originalname, "banners", req.file.mimetype);
+  const signedUrl = await storageService.getSignedUrl(filePath, DEFAULT_SIGNED_URL_EXPIRY_MS);
 
-  const fileUrl = `${req.protocol}://${host}/uploads/promotions/${req.file.filename}`;
-  res.status(201).json({ url: fileUrl });
+  res.status(201).json({
+    url: signedUrl,
+    path: filePath,
+  });
 };
 
 export const runBannerAdsLifecycle = async () => {

@@ -52,8 +52,8 @@ const parseTransferMetaFromPaymentRef = (value?: string | null) => {
 const buildListingTitle = (listing?: { make?: string | null; model?: string | null; year?: number | null } | null) =>
   [listing?.make, listing?.model, listing?.year ? String(listing.year) : null].filter(Boolean).join(" ") || "Listing";
 
-const getPaidRevenueOccurredAt = (payment: { paidAt?: Date | null; updatedAt: Date; createdAt: Date }) =>
-  payment.paidAt ?? payment.updatedAt ?? payment.createdAt;
+const getPaidRevenueOccurredAt = (payment: { paidAt?: Date | null; createdAt: Date }) =>
+  payment.paidAt ?? payment.createdAt;
 
 const monetizedBannerStatuses: Array<"WAITLIST" | "ACTIVE" | "EXPIRED"> = ["WAITLIST", "ACTIVE", "EXPIRED"];
 
@@ -265,12 +265,11 @@ export const getAdminDashboardCharts = async (req: Request, res: Response) => {
         status: "PAID",
         OR: [
           { paidAt: { gte: buckets.start, lt: buckets.end } },
-          { AND: [{ paidAt: null }, { updatedAt: { gte: buckets.start, lt: buckets.end } }] },
-          { AND: [{ paidAt: null }, { updatedAt: null }, { createdAt: { gte: buckets.start, lt: buckets.end } }] },
+          { AND: [{ paidAt: null }, { createdAt: { gte: buckets.start, lt: buckets.end } }] },
         ],
         purpose: { in: ["LISTING_FEE", "COMMISSION", "RENTAL"] },
       },
-      select: { createdAt: true, updatedAt: true, paidAt: true, amountAed: true, purpose: true },
+      select: { createdAt: true, paidAt: true, amountAed: true, purpose: true },
     }),
     prisma.bannerAd.findMany({
       where: {

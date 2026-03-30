@@ -67,6 +67,7 @@ app.use(
 );
 app.use(express.json({ limit: "2mb" }));
 app.use(cookieParser());
+app.use("/uploads", express.static(path.resolve(process.cwd(), "public/uploads")));
 app.use("/uploads", express.static(path.resolve(process.cwd(), "uploads")));
 app.use("/api", apiRateLimiter);
 

@@ -3,7 +3,8 @@ import { z } from "zod";
 import { prisma } from "../lib/prisma";
 import { purgeCancelledGroups } from "../lib/group-lifecycle";
 import { getUserVerificationGate } from "../lib/identity-verification";
-import { isSafeHttpUrl, sanitizePlainText } from "../lib/security";
+import { sanitizePlainText } from "../lib/security";
+import { storageService } from "../services/storageService";
 
 type AuthedRequest = Request & {
   authUser?: {
@@ -25,8 +26,16 @@ const createGroupSchema = z.object({
 
 const updateGroupProfileImageSchema = z.object({
   requesterId: z.string().min(1),
-  imageUrl: z.string().trim().min(1),
+  imageUrl: z.string().trim().min(1).optional(),
+  imagePath: z.string().trim().min(1).optional(),
 });
+
+const DEFAULT_SIGNED_URL_EXPIRY_MS = 365 * 24 * 60 * 60 * 1000;
+
+const signGroupImageField = async (value?: string | null) => {
+  if (!value) return value ?? null;
+  return storageService.getSignedUrl(value, DEFAULT_SIGNED_URL_EXPIRY_MS);
+};
 
 export const listGroups = async (req: Request, res: Response) => {
   await purgeCancelledGroups(prisma);
@@ -46,7 +55,14 @@ export const listGroups = async (req: Request, res: Response) => {
     orderBy: { createdAt: "desc" },
   });
 
-  res.status(200).json(items);
+  const signedItems = await Promise.all(
+    items.map(async (item: (typeof items)[number]) => ({
+      ...item,
+      description: await signGroupImageField(item.description),
+    }))
+  );
+
+  res.status(200).json(signedItems);
 };
 
 export const createGroup = async (req: Request, res: Response) => {
@@ -163,7 +179,10 @@ export const getGroupById = async (req: Request<{ id: string }>, res: Response) 
     return;
   }
 
-  res.status(200).json(group);
+  res.status(200).json({
+    ...group,
+    description: await signGroupImageField(group.description),
+  });
 };
 
 export const addGroupMember = async (req: Request<{ id: string }>, res: Response) => {
@@ -439,22 +458,22 @@ export const uploadGroupProfileImage = async (
     return;
   }
 
-  const host = req.get("host");
-  if (!host) {
-    res.status(400).json({ message: "Unable to determine host" });
-    return;
-  }
+  const filePath = await storageService.uploadFile(req.file.buffer, req.file.originalname, "profiles/groups", req.file.mimetype);
+  const signedUrl = await storageService.getSignedUrl(filePath, DEFAULT_SIGNED_URL_EXPIRY_MS);
 
-  const fileUrl = `${req.protocol}://${host}/uploads/groups/${req.file.filename}`;
-  res.status(201).json({ url: fileUrl });
+  res.status(201).json({
+    url: signedUrl,
+    path: filePath,
+  });
 };
 
 export const updateGroupProfileImage = async (req: Request<{ id: string }>, res: Response) => {
   const groupId = String(req.params.id);
   const payload = updateGroupProfileImageSchema.parse(req.body);
 
-  if (!isSafeHttpUrl(payload.imageUrl)) {
-    res.status(400).json({ message: "Image URL must be a valid http(s) URL" });
+  const imagePath = String(payload.imagePath ?? payload.imageUrl ?? "").trim();
+  if (!imagePath) {
+    res.status(400).json({ message: "imagePath is required" });
     return;
   }
 
@@ -487,9 +506,12 @@ export const updateGroupProfileImage = async (req: Request<{ id: string }>, res:
   const updated = await prisma.group.update({
     where: { id: groupId },
     data: {
-      description: payload.imageUrl.trim(),
+      description: imagePath,
     },
   });
 
-  res.status(200).json(updated);
+  res.status(200).json({
+    ...updated,
+    description: await signGroupImageField(updated.description),
+  });
 };

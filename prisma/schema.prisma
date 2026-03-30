@@ -899,3 +899,12 @@ model PlatformFeeSetting {
   createdAt            DateTime @default(now())
   updatedAt            DateTime @updatedAt
 }
+
+model HeroSettings {
+  id          String   @id @default(cuid())
+  videoPath   String?
+  headline    String?
+  subheadline String?
+  ctaLabel    String?
+  updatedAt   DateTime @updatedAt
+}

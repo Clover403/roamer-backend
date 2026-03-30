@@ -14,6 +14,7 @@ import { adsRouter } from "./ads";
 import { paymentsRouter } from "./payments";
 import { adminRouter } from "./admin";
 import { garageRouter } from "./garage";
+import { heroSettingsRouter } from "./hero-settings";
 
 export const apiRouter = Router();
 
@@ -32,3 +33,4 @@ apiRouter.use("/ads", adsRouter);
 apiRouter.use("/payments", paymentsRouter);
 apiRouter.use("/admin", adminRouter);
 apiRouter.use("/garage", garageRouter);
+apiRouter.use("/hero-settings", heroSettingsRouter);

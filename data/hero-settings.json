@@ -1,0 +1,54 @@
+{
+  "marketplaceBanners": [
+    {
+      "topText": "01 / ELECTRIC ERA NYA MEMEK",
+      "mainText": "SILENT SPEED ANGEL",
+      "description": "Discover the pinnacle of automotive engineering and aesthetic rarity.",
+      "image": "https://images.unsplash.com/photo-1592198084033-aade902d1aae?w=900&auto=format&fit=crop&q=60",
+      "cta": null,
+      "listingId": null
+    },
+    {
+      "topText": "02 / GT3 HERITAGE",
+      "mainText": "PURE RACING MACHINE kontoll",
+      "description": "Discover the pinnacle of automotive engineering and aesthetic rarity.",
+      "image": "banners/1774886601441-Whisk_3e2c2b6f2096bc39a794d774b028c56aeg-0e0d210f.png",
+      "cta": null,
+      "listingId": null
+    },
+    {
+      "topText": "03 / ELECTRIC AGE",
+      "mainText": "SPECIAL RAMADAN OFFER",
+      "description": "Discover the pinnacle of automotive engineering and aesthetic rarity.",
+      "image": "https://images.unsplash.com/photo-1626966490756-6ac9354255c6?q=80&w=3687",
+      "cta": null,
+      "listingId": null
+    }
+  ],
+  "rentalBanners": [
+    {
+      "topText": "01 / RENTAL PREMIUM",
+      "mainText": "FLEXIBLE LUXURY RENTALS",
+      "description": "Book premium rentals with flexible plans.",
+      "image": "https://images.unsplash.com/photo-1592198084033-aade902d1aae?w=900&auto=format&fit=crop&q=60",
+      "cta": null,
+      "listingId": null
+    },
+    {
+      "topText": "02 / WEEKEND ESCAPE",
+      "mainText": "DRIVE THE EXTRAORDINARY",
+      "description": "Choose from curated high-performance assets for your next drive.",
+      "image": "https://images.unsplash.com/photo-1729118655662-352c4a776ebd?q=80&w=1298",
+      "cta": null,
+      "listingId": null
+    },
+    {
+      "topText": "03 / DAILY ELITE",
+      "mainText": "ROAMER RENTAL COLLECTION",
+      "description": "Reliable, verified, and ready for your schedule.",
+      "image": "https://images.unsplash.com/photo-1626966490756-6ac9354255c6?q=80&w=3687",
+      "cta": null,
+      "listingId": null
+    }
+  ]
+}

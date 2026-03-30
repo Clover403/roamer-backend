@@ -9,11 +9,15 @@ import { createSocketServer } from "./socket";
 import { prisma } from "./lib/prisma";
 import { runRentalLifecycle } from "./controllers/rentals.controller";
 import { runBannerAdsLifecycle } from "./controllers/ads.controller";
+import { storageRuntime } from "./services/storageService";
 
 const server = http.createServer(app);
 createSocketServer(server);
 
 const start = async () => {
+  // eslint-disable-next-line no-console
+  console.log(`[storage] mode=${storageRuntime.mode}${storageRuntime.bucketName ? ` bucket=${storageRuntime.bucketName}` : ""}`);
+
   server.listen(env.PORT, () => {
     // eslint-disable-next-line no-console
     console.log(`Roamer backend listening on http://localhost:${env.PORT}`);
