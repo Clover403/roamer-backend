@@ -193,6 +193,7 @@ const updateHeroSettingsSchema = z
     headline: z.string().trim().max(200).optional(),
     subheadline: z.string().trim().max(400).optional(),
     ctaLabel: z.string().trim().max(80).optional(),
+    mediaUrl: z.string().trim().max(4000).optional().nullable(),
     marketplaceBanners: z.array(bannerItemSchema).length(3).optional(),
     rentalBanners: z.array(bannerItemSchema).length(3).optional(),
   })
@@ -289,8 +290,8 @@ const serializeHeroSettings = async (settings: {
 
   return {
     id: settings.id,
-    videoPath: signedVideoUrl,
-    videoStoragePath: settings.videoPath,
+    mediaUrl: signedVideoUrl,
+    mediaStoragePath: settings.videoPath,
     headline: settings.headline,
     subheadline: settings.subheadline,
     ctaLabel: settings.ctaLabel,
@@ -325,12 +326,22 @@ export const updateAdminHeroSettings = async (req: Request, res: Response) => {
     rentalBanners: nextFileSettings.rentalBanners,
   });
 
+  let nextVideoPath = settings.videoPath;
+  if (payload.mediaUrl !== undefined) {
+    if (payload.mediaUrl === null || payload.mediaUrl === "") {
+      nextVideoPath = null;
+    } else {
+      nextVideoPath = payload.mediaUrl;
+    }
+  }
+
   if (!delegate) {
     heroSettingsFallback = {
       ...heroSettingsFallback,
       headline: payload.headline ?? heroSettingsFallback.headline,
       subheadline: payload.subheadline ?? heroSettingsFallback.subheadline,
       ctaLabel: payload.ctaLabel ?? heroSettingsFallback.ctaLabel,
+      videoPath: nextVideoPath,
       updatedAt: new Date(),
     };
 
@@ -344,6 +355,7 @@ export const updateAdminHeroSettings = async (req: Request, res: Response) => {
       ...(payload.headline !== undefined ? { headline: payload.headline } : {}),
       ...(payload.subheadline !== undefined ? { subheadline: payload.subheadline } : {}),
       ...(payload.ctaLabel !== undefined ? { ctaLabel: payload.ctaLabel } : {}),
+      ...(payload.mediaUrl !== undefined ? { videoPath: nextVideoPath } : {}),
     },
   });
 
@@ -377,7 +389,7 @@ export const uploadAdminHeroVideo = async (req: Request & { file?: Express.Multe
       });
     }
 
-    if (settings.videoPath && settings.videoPath !== filePath) {
+    if (settings.videoPath && settings.videoPath !== filePath && !isHttpUrl(settings.videoPath)) {
       await storageService.deleteFile(settings.videoPath);
     }
 
