@@ -266,10 +266,15 @@ const serializeHeroSettings = async (settings: {
   const fileSettings = readHeroSettingsFile();
   const ensuredFileSettings = await ensureHeroBannersStoredInGcp(fileSettings);
   if (ensuredFileSettings.changed) {
-    writeHeroSettingsFile({
-      marketplaceBanners: ensuredFileSettings.marketplaceBanners,
-      rentalBanners: ensuredFileSettings.rentalBanners,
-    });
+    try {
+      writeHeroSettingsFile({
+        marketplaceBanners: ensuredFileSettings.marketplaceBanners,
+        rentalBanners: ensuredFileSettings.rentalBanners,
+      });
+    } catch {
+      // Ignore file-system persistence issues in ephemeral/read-only runtimes.
+      // Response can still use the in-memory normalized values for this request.
+    }
   }
 
   const signedVideoUrl = settings.videoPath
@@ -321,10 +326,14 @@ export const updateAdminHeroSettings = async (req: Request, res: Response) => {
     marketplaceBanners: payload.marketplaceBanners ?? fileSettings.marketplaceBanners,
     rentalBanners: payload.rentalBanners ?? fileSettings.rentalBanners,
   });
-  writeHeroSettingsFile({
-    marketplaceBanners: nextFileSettings.marketplaceBanners,
-    rentalBanners: nextFileSettings.rentalBanners,
-  });
+  try {
+    writeHeroSettingsFile({
+      marketplaceBanners: nextFileSettings.marketplaceBanners,
+      rentalBanners: nextFileSettings.rentalBanners,
+    });
+  } catch {
+    // Ignore file-system persistence issues in ephemeral/read-only runtimes.
+  }
 
   let nextVideoPath = settings.videoPath;
   if (payload.mediaUrl !== undefined) {
