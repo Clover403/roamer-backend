@@ -11,12 +11,25 @@ import { runRentalLifecycle } from "./controllers/rentals.controller";
 import { runBannerAdsLifecycle } from "./controllers/ads.controller";
 import { storageRuntime } from "./services/storageService";
 
+const parseDatabaseTarget = (url: string) => {
+  try {
+    const parsed = new URL(url);
+    const database = parsed.pathname.replace(/^\//, "") || "(unknown)";
+    const schema = parsed.searchParams.get("schema") || "public";
+    return `${parsed.hostname}:${parsed.port || "5432"}/${database}?schema=${schema}`;
+  } catch {
+    return "(invalid DATABASE_URL)";
+  }
+};
+
 const server = http.createServer(app);
 createSocketServer(server);
 
 const start = async () => {
   // eslint-disable-next-line no-console
   console.log(`[storage] mode=${storageRuntime.mode}${storageRuntime.bucketName ? ` bucket=${storageRuntime.bucketName}` : ""}`);
+  // eslint-disable-next-line no-console
+  console.log(`[db] target=${parseDatabaseTarget(env.DATABASE_URL)}`);
 
   server.listen(env.PORT, () => {
     // eslint-disable-next-line no-console
