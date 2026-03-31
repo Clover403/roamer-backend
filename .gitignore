@@ -9,3 +9,6 @@ secrets/
 dist
 coverage
 *.log
+
+# Runtime-managed data (do not version)
+data/hero-settings.json
