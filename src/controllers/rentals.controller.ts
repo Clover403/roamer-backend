@@ -23,6 +23,12 @@ type RentalMeta = {
   cancelledBy?: "SELLER" | "RENTER";
 };
 
+const isMissingRentalBookingTableError = (error: unknown): boolean => {
+  if (!error || typeof error !== "object") return false;
+  const maybeError = error as { code?: string; meta?: { modelName?: string } };
+  return maybeError.code === "P2021" && maybeError.meta?.modelName === "RentalBooking";
+};
+
 const parseRentalMeta = (rawNotes?: string | null): RentalMeta => {
   if (!rawNotes) return {};
 
@@ -65,17 +71,25 @@ const expireUnpaidApprovedRentals = async () => {
 
 const completeElapsedActiveRentals = async () => {
   const now = new Date();
-  const result = await prisma.rentalBooking.updateMany({
-    where: {
-      status: "ACTIVE",
-      endDate: {
-        lte: now,
+  let result: { count: number };
+  try {
+    result = await prisma.rentalBooking.updateMany({
+      where: {
+        status: "ACTIVE",
+        endDate: {
+          lte: now,
+        },
       },
-    },
-    data: {
-      status: "COMPLETED",
-    },
-  });
+      data: {
+        status: "COMPLETED",
+      },
+    });
+  } catch (error: unknown) {
+    if (isMissingRentalBookingTableError(error)) {
+      return { completed: 0 };
+    }
+    throw error;
+  }
 
   if (result.count > 0) {
     const affected = await prisma.rentalBooking.findMany({
