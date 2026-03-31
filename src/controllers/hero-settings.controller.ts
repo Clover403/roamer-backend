@@ -7,6 +7,7 @@ import { storageService } from "../services/storageService";
 
 const DEFAULT_SIGNED_URL_EXPIRY_MS = 365 * 24 * 60 * 60 * 1000;
 const HERO_SETTINGS_FILE = path.resolve(process.cwd(), "data/hero-settings.json");
+const HERO_SETTINGS_STORAGE_PATH = "hero/hero-settings.json";
 
 const bannerItemSchema = z.object({
   topText: z.string().trim().max(80),
@@ -87,7 +88,24 @@ const normalizeBannerList = (value: unknown, fallback: BannerItem[]) => {
   return withThreeItems;
 };
 
-const readHeroSettingsFile = () => {
+const readHeroSettingsFile = async () => {
+  try {
+    const raw = await storageService.readTextFile(HERO_SETTINGS_STORAGE_PATH);
+    if (raw) {
+      const data = JSON.parse(raw) as {
+        marketplaceBanners?: unknown;
+        rentalBanners?: unknown;
+      };
+
+      return {
+        marketplaceBanners: normalizeBannerList(data.marketplaceBanners, DEFAULT_MARKETPLACE_BANNERS),
+        rentalBanners: normalizeBannerList(data.rentalBanners, DEFAULT_RENTAL_BANNERS),
+      };
+    }
+  } catch {
+    // fallback to local file
+  }
+
   try {
     if (!fs.existsSync(HERO_SETTINGS_FILE)) {
       return {
@@ -114,20 +132,30 @@ const readHeroSettingsFile = () => {
   }
 };
 
-const writeHeroSettingsFile = (data: { marketplaceBanners: BannerItem[]; rentalBanners: BannerItem[] }) => {
-  fs.mkdirSync(path.dirname(HERO_SETTINGS_FILE), { recursive: true });
-  fs.writeFileSync(
-    HERO_SETTINGS_FILE,
-    JSON.stringify(
-      {
-        marketplaceBanners: normalizeBannerList(data.marketplaceBanners, DEFAULT_MARKETPLACE_BANNERS),
-        rentalBanners: normalizeBannerList(data.rentalBanners, DEFAULT_RENTAL_BANNERS),
-      },
-      null,
-      2
-    ),
-    "utf8"
-  );
+const writeHeroSettingsFile = async (data: { marketplaceBanners: BannerItem[]; rentalBanners: BannerItem[] }) => {
+  const normalized = {
+    marketplaceBanners: normalizeBannerList(data.marketplaceBanners, DEFAULT_MARKETPLACE_BANNERS),
+    rentalBanners: normalizeBannerList(data.rentalBanners, DEFAULT_RENTAL_BANNERS),
+  };
+
+  const payload = JSON.stringify(normalized, null, 2);
+
+  let wroteToStorage = false;
+  try {
+    await storageService.writeTextFile(HERO_SETTINGS_STORAGE_PATH, payload, "application/json");
+    wroteToStorage = true;
+  } catch {
+    // local fallback below
+  }
+
+  try {
+    fs.mkdirSync(path.dirname(HERO_SETTINGS_FILE), { recursive: true });
+    fs.writeFileSync(HERO_SETTINGS_FILE, payload, "utf8");
+  } catch {
+    if (!wroteToStorage) {
+      throw new Error("Failed to persist hero banner settings");
+    }
+  }
 };
 
 const isHttpUrl = (value: string) => /^https?:\/\//i.test(value);
@@ -245,6 +273,10 @@ const getHeroSettingsDelegate = () => {
 const getOrCreateHeroSettings = async () => {
   const delegate = getHeroSettingsDelegate();
   if (!delegate) {
+    if (process.env.NODE_ENV === "production") {
+      throw new Error("HeroSettings delegate is unavailable. Ensure Prisma client is generated and migrations are deployed.");
+    }
+
     return heroSettingsFallback;
   }
 
@@ -263,18 +295,13 @@ const serializeHeroSettings = async (settings: {
   ctaLabel: string | null;
   updatedAt: Date;
 }) => {
-  const fileSettings = readHeroSettingsFile();
+  const fileSettings = await readHeroSettingsFile();
   const ensuredFileSettings = await ensureHeroBannersStoredInGcp(fileSettings);
   if (ensuredFileSettings.changed) {
-    try {
-      writeHeroSettingsFile({
-        marketplaceBanners: ensuredFileSettings.marketplaceBanners,
-        rentalBanners: ensuredFileSettings.rentalBanners,
-      });
-    } catch {
-      // Ignore file-system persistence issues in ephemeral/read-only runtimes.
-      // Response can still use the in-memory normalized values for this request.
-    }
+    await writeHeroSettingsFile({
+      marketplaceBanners: ensuredFileSettings.marketplaceBanners,
+      rentalBanners: ensuredFileSettings.rentalBanners,
+    });
   }
 
   const signedVideoUrl = settings.videoPath
@@ -321,19 +348,15 @@ export const updateAdminHeroSettings = async (req: Request, res: Response) => {
   const settings = await getOrCreateHeroSettings();
   const delegate = getHeroSettingsDelegate();
 
-  const fileSettings = readHeroSettingsFile();
+  const fileSettings = await readHeroSettingsFile();
   const nextFileSettings = await ensureHeroBannersStoredInGcp({
     marketplaceBanners: payload.marketplaceBanners ?? fileSettings.marketplaceBanners,
     rentalBanners: payload.rentalBanners ?? fileSettings.rentalBanners,
   });
-  try {
-    writeHeroSettingsFile({
-      marketplaceBanners: nextFileSettings.marketplaceBanners,
-      rentalBanners: nextFileSettings.rentalBanners,
-    });
-  } catch {
-    // Ignore file-system persistence issues in ephemeral/read-only runtimes.
-  }
+  await writeHeroSettingsFile({
+    marketplaceBanners: nextFileSettings.marketplaceBanners,
+    rentalBanners: nextFileSettings.rentalBanners,
+  });
 
   let nextVideoPath = settings.videoPath;
   if (payload.mediaUrl !== undefined) {

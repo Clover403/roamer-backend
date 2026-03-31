@@ -135,9 +135,57 @@ export const getSignedUrl = async (filePath: string, expiresInMs: number = ONE_Y
 export const getSignedUrls = async (filePaths: string[]): Promise<string[]> =>
   Promise.all(filePaths.map((filePath) => getSignedUrl(filePath)));
 
+const isMissingObjectError = (error: unknown): boolean => {
+  const message = error instanceof Error ? error.message : "";
+  return message.includes("No such object") || message.includes("404");
+};
+
+export const readTextFile = async (filePath: string): Promise<string | null> => {
+  if (!filePath) return null;
+
+  if (!bucket) {
+    throw new Error("Cloud storage bucket is not initialized.");
+  }
+
+  try {
+    const [buffer] = await bucket.file(filePath).download();
+    return buffer.toString("utf8");
+  } catch (error: unknown) {
+    if (isMissingObjectError(error)) {
+      return null;
+    }
+
+    throw error;
+  }
+};
+
+export const writeTextFile = async (
+  filePath: string,
+  content: string,
+  contentType: string = "application/json"
+): Promise<void> => {
+  if (!filePath) {
+    throw new Error("filePath is required");
+  }
+
+  if (!bucket) {
+    throw new Error("Cloud storage bucket is not initialized.");
+  }
+
+  await bucket.file(filePath).save(Buffer.from(content, "utf8"), {
+    resumable: false,
+    contentType,
+    metadata: {
+      cacheControl: "no-store",
+    },
+  });
+};
+
 export const storageService = {
   uploadFile,
   deleteFile,
   getSignedUrl,
   getSignedUrls,
+  readTextFile,
+  writeTextFile,
 };

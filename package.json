@@ -5,7 +5,7 @@
   "main": "dist/index.js",
   "scripts": {
     "dev": "prisma db push && tsx watch src/index.ts",
-    "build": "tsc -p tsconfig.json",
+    "build": "prisma generate && tsc -p tsconfig.json",
     "start": "node dist/index.js",
     "test": "jest --runInBand",
     "test:watch": "jest --watch",
