@@ -27,6 +27,7 @@ export const setAuthCookie = (res: Response, token: string) => {
     secure: env.NODE_ENV === "production",
     maxAge: env.JWT_COOKIE_MAX_AGE_MS,
     path: "/",
+    domain: env.JWT_COOKIE_DOMAIN,
   });
 };
 
@@ -36,5 +37,6 @@ export const clearAuthCookie = (res: Response) => {
     sameSite: env.JWT_COOKIE_SAME_SITE,
     secure: env.NODE_ENV === "production",
     path: "/",
+    domain: env.JWT_COOKIE_DOMAIN,
   });
 };

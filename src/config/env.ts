@@ -30,13 +30,14 @@ export const env = {
   CORS_ORIGIN: process.env.CORS_ORIGIN ?? "http://localhost:5173",
   CORS_ORIGINS: toOrigins(
     process.env.CORS_ORIGINS ?? process.env.CORS_ORIGIN,
-    ["http://localhost:5173", "http://127.0.0.1:5173", "https://*.vercel.app"]
+    ["http://localhost:5173", "http://127.0.0.1:5173"]
   ),
   JWT_SECRET: process.env.JWT_SECRET ?? "",
   JWT_EXPIRES_IN: process.env.JWT_EXPIRES_IN ?? "7d",
   JWT_COOKIE_NAME: process.env.JWT_COOKIE_NAME ?? "roamer_access_token",
   JWT_COOKIE_MAX_AGE_MS: toPositiveNumber(process.env.JWT_COOKIE_MAX_AGE_MS, 7 * 24 * 60 * 60 * 1000),
   JWT_COOKIE_SAME_SITE: (process.env.JWT_COOKIE_SAME_SITE ?? "lax") as "lax" | "strict" | "none",
+  JWT_COOKIE_DOMAIN: process.env.JWT_COOKIE_DOMAIN,
   APP_BASE_URL: process.env.APP_BASE_URL ?? "http://localhost:5173",
   BACKEND_PUBLIC_URL: process.env.BACKEND_PUBLIC_URL ?? `http://localhost:${process.env.PORT ?? "4000"}`,
   RESEND_API_KEY: process.env.RESEND_API_KEY ?? "",
