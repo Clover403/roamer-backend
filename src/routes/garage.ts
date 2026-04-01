@@ -3,6 +3,7 @@ import {
 	createMyGarageAsset,
 	deactivateMyGarageAsset,
 	listMyGarageAssets,
+	reactivateMyGarageAsset,
 	updateGarageLatestValue,
 	updateMyGarageAsset,
 } from "../controllers/garage.controller";
@@ -15,4 +16,5 @@ garageRouter.get("/my-assets", requireAuth, asyncHandler(listMyGarageAssets));
 garageRouter.post("/my-assets", requireAuth, asyncHandler(createMyGarageAsset));
 garageRouter.patch("/my-assets/:listingId", requireAuth, asyncHandler(updateMyGarageAsset));
 garageRouter.patch("/my-assets/:listingId/deactivate", requireAuth, asyncHandler(deactivateMyGarageAsset));
+garageRouter.patch("/my-assets/:listingId/reactivate", requireAuth, asyncHandler(reactivateMyGarageAsset));
 garageRouter.patch("/latest-value", requireAuth, asyncHandler(updateGarageLatestValue));

@@ -38,6 +38,15 @@ const signGroupImageField = async (value?: string | null) => {
 };
 
 export const listGroups = async (req: Request, res: Response) => {
+  const authedReq = req as AuthedRequest;
+  const authUserId = authedReq.authUser?.id;
+  const authUserRole = authedReq.authUser?.role;
+
+  if (!authUserId) {
+    res.status(401).json({ message: "Unauthenticated" });
+    return;
+  }
+
   await purgeCancelledGroups(prisma);
 
   const { listingId, status } = req.query;
@@ -45,6 +54,14 @@ export const listGroups = async (req: Request, res: Response) => {
   const where: Record<string, unknown> = {};
   if (listingId) where.listingId = String(listingId);
   if (status) where.status = String(status);
+
+  if (authUserRole !== "ADMIN") {
+    where.OR = [
+      { creatorId: authUserId },
+      { members: { some: { userId: authUserId } } },
+      { listing: { sellerId: authUserId } },
+    ];
+  }
 
   const items = await prisma.group.findMany({
     where,
@@ -161,6 +178,15 @@ export const createGroup = async (req: Request, res: Response) => {
 };
 
 export const getGroupById = async (req: Request<{ id: string }>, res: Response) => {
+  const authedReq = req as AuthedRequest;
+  const authUserId = authedReq.authUser?.id;
+  const authUserRole = authedReq.authUser?.role;
+
+  if (!authUserId) {
+    res.status(401).json({ message: "Unauthenticated" });
+    return;
+  }
+
   const groupId = String(req.params.id);
 
   await purgeCancelledGroups(prisma);
@@ -177,6 +203,16 @@ export const getGroupById = async (req: Request<{ id: string }>, res: Response) 
   if (!group) {
     res.status(404).json({ message: "Group not found" });
     return;
+  }
+
+  if (authUserRole !== "ADMIN") {
+    const isMember = group.members.some((member: { userId: string }) => member.userId === authUserId);
+    const isSeller = group.listing?.sellerId === authUserId;
+
+    if (!isMember && !isSeller) {
+      res.status(403).json({ message: "Access denied. You are not a legal member of this group." });
+      return;
+    }
   }
 
   res.status(200).json({

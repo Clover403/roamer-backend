@@ -339,6 +339,76 @@ export const deactivateMyGarageAsset = async (req: AuthedRequest, res: Response)
   });
 };
 
+export const reactivateMyGarageAsset = async (req: AuthedRequest, res: Response) => {
+  const userId = req.authUser?.id;
+  const listingId = String(req.params.listingId ?? "").trim();
+
+  if (!userId) {
+    res.status(401).json({ message: "Unauthenticated" });
+    return;
+  }
+
+  if (!listingId) {
+    res.status(400).json({ message: "listingId is required" });
+    return;
+  }
+
+  const inactiveAsset = await prisma.garageAsset.findFirst({
+    where: {
+      userId,
+      listingId,
+      assetType: "SAVED",
+      notes: { startsWith: DEACTIVATED_ASSET_PREFIX },
+    },
+    select: {
+      id: true,
+      currentValue: true,
+    },
+  });
+
+  if (!inactiveAsset) {
+    res.status(404).json({ message: "Inactive garage asset not found" });
+    return;
+  }
+
+  const ownedAsset = await prisma.garageAsset.findFirst({
+    where: {
+      userId,
+      listingId,
+      assetType: "OWNED",
+    },
+    select: { id: true },
+  });
+
+  await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
+    if (ownedAsset) {
+      await tx.garageAsset.update({
+        where: { id: ownedAsset.id },
+        data: { currentValue: inactiveAsset.currentValue },
+      });
+    } else {
+      await tx.garageAsset.create({
+        data: {
+          userId,
+          listingId,
+          assetType: "OWNED",
+          currentValue: inactiveAsset.currentValue,
+          notes: "Reactivated from inactive asset",
+        },
+      });
+    }
+
+    await tx.garageAsset.delete({
+      where: { id: inactiveAsset.id },
+    });
+  });
+
+  res.status(200).json({
+    listingId,
+    assetType: "OWNED",
+  });
+};
+
 export const listMyGarageAssets = async (req: AuthedRequest, res: Response) => {
   const userId = req.authUser?.id;
   const listingIdFilter = typeof req.query.id === "string" ? req.query.id : undefined;

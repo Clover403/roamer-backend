@@ -830,6 +830,18 @@ export const getSellerDashboardOverview = async (req: Request<{ id: string }>, r
       include: {
         listing: true,
         participants: true,
+        contracts: {
+          select: {
+            id: true,
+            title: true,
+            documentUrl: true,
+            updatedAt: true,
+          },
+          orderBy: {
+            updatedAt: "desc",
+          },
+          take: 1,
+        },
         group: {
           include: {
             members: {
@@ -901,6 +913,28 @@ export const getSellerDashboardOverview = async (req: Request<{ id: string }>, r
 
   const activityDeltaPct = getChangePercent(eventsCurrentRange, eventsPreviousRange);
 
+  const recentOffersWithContract = await Promise.all(
+    recentOffers.map(async (offer: (typeof recentOffers)[number]) => {
+      const latestContract = offer.contracts?.[0];
+      const signedContractUrl = latestContract?.documentUrl
+        ? await storageService
+            .getSignedUrl(latestContract.documentUrl, DEFAULT_SIGNED_URL_EXPIRY_MS)
+            .catch(() => latestContract.documentUrl)
+        : null;
+
+      return {
+        ...offer,
+        contract: latestContract
+          ? {
+              id: latestContract.id,
+              title: latestContract.title,
+              documentUrl: signedContractUrl,
+            }
+          : null,
+      };
+    })
+  );
+
   res.status(200).json({
     range,
     summary: {
@@ -918,7 +952,7 @@ export const getSellerDashboardOverview = async (req: Request<{ id: string }>, r
     },
     recent: {
       rentals: recentRentals,
-      offers: recentOffers,
+      offers: recentOffersWithContract,
     },
   });
 };

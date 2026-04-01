@@ -181,6 +181,7 @@ const sendPasswordResetEmail = async (params: { email: string; fullName: string;
 };
 
 const redirectWithError = (res: Response, errorCode: string) => {
+  clearAuthCookie(res);
   const target = new URL("/auth", env.APP_BASE_URL);
   target.searchParams.set("error", errorCode);
   res.redirect(target.toString());
@@ -593,6 +594,8 @@ export const googleAuthStart = async (_req: Request, res: Response) => {
     redirectWithError(res, "google_not_configured");
     return;
   }
+
+  clearAuthCookie(res);
 
   const authUrl = new URL("https://accounts.google.com/o/oauth2/v2/auth");
   authUrl.searchParams.set("client_id", env.GOOGLE_CLIENT_ID);

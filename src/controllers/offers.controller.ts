@@ -3,8 +3,18 @@ import type { Prisma } from "@prisma/client";
 import { z } from "zod";
 import { prisma } from "../lib/prisma";
 import { markListingSoldAndCancelCompetingGroups, purgeCancelledGroups } from "../lib/group-lifecycle";
+import { storageService } from "../services/storageService";
 
 const OFFER_VALIDITY_DAYS = 14;
+const DEFAULT_SIGNED_URL_EXPIRY_MS = 365 * 24 * 60 * 60 * 1000;
+const OFFER_STATUSES = ["DRAFT", "PENDING_MEMBER_APPROVAL", "PENDING_SELLER_REVIEW", "ACCEPTED", "REJECTED", "EXPIRED"] as const;
+
+type AuthedRequest = Request & {
+  authUser?: {
+    id: string;
+    role: "USER" | "ADMIN";
+  };
+};
 
 const addDays = (date: Date, days: number): Date => {
   const next = new Date(date);
@@ -13,13 +23,36 @@ const addDays = (date: Date, days: number): Date => {
 };
 
 export const listOffers = async (req: Request, res: Response) => {
+  const authedReq = req as AuthedRequest;
+  const authUserId = authedReq.authUser?.id;
+  const authUserRole = authedReq.authUser?.role;
+
+  if (!authUserId) {
+    res.status(401).json({ message: "Unauthenticated" });
+    return;
+  }
+
   await purgeCancelledGroups(prisma);
 
   const { groupId, status } = req.query;
 
-  const where: Record<string, unknown> = {};
+  const where: Prisma.JointOfferWhereInput = {};
   if (groupId) where.groupId = String(groupId);
-  if (status) where.status = String(status);
+  if (status) {
+    const statusValue = String(status);
+    if (OFFER_STATUSES.includes(statusValue as (typeof OFFER_STATUSES)[number])) {
+      where.status = statusValue as (typeof OFFER_STATUSES)[number];
+    }
+  }
+
+  if (authUserRole !== "ADMIN") {
+    where.OR = [
+      { createdById: authUserId },
+      { participants: { some: { userId: authUserId } } },
+      { group: { members: { some: { userId: authUserId } } } },
+      { listing: { sellerId: authUserId } },
+    ];
+  }
 
   await prisma.jointOffer.updateMany({
     where: {
@@ -37,14 +70,69 @@ export const listOffers = async (req: Request, res: Response) => {
 
   const items = await prisma.jointOffer.findMany({
     where,
-    include: { participants: true, group: true, listing: true },
+    include: {
+      participants: true,
+      group: true,
+      listing: {
+        include: {
+          seller: {
+            select: {
+              id: true,
+              fullName: true,
+            },
+          },
+        },
+      },
+      contracts: {
+        select: {
+          id: true,
+          title: true,
+          documentUrl: true,
+          updatedAt: true,
+        },
+        orderBy: {
+          updatedAt: "desc",
+        },
+        take: 1,
+      },
+    },
     orderBy: { createdAt: "desc" },
   });
 
-  res.status(200).json(items);
+  const itemsWithContract = await Promise.all(
+    items.map(async (item: (typeof items)[number]) => {
+      const latestContract = item.contracts?.[0];
+      const signedContractUrl = latestContract?.documentUrl
+        ? await storageService
+            .getSignedUrl(latestContract.documentUrl, DEFAULT_SIGNED_URL_EXPIRY_MS)
+            .catch(() => latestContract.documentUrl)
+        : null;
+
+      return {
+        ...item,
+        contract: latestContract
+          ? {
+              id: latestContract.id,
+              title: latestContract.title,
+              documentUrl: signedContractUrl,
+            }
+          : null,
+      };
+    })
+  );
+
+  res.status(200).json(itemsWithContract);
 };
 
 export const createOffer = async (req: Request, res: Response) => {
+  const authedReq = req as AuthedRequest;
+  const authUserId = authedReq.authUser?.id;
+
+  if (!authUserId) {
+    res.status(401).json({ message: "Unauthenticated" });
+    return;
+  }
+
   const payload = z
     .object({
       groupId: z.string().min(1),
@@ -63,6 +151,11 @@ export const createOffer = async (req: Request, res: Response) => {
       ),
     })
     .parse(req.body);
+
+  if (payload.createdById !== authUserId) {
+    res.status(403).json({ message: "createdById must match authenticated user" });
+    return;
+  }
 
   const group = await prisma.group.findUnique({
     where: { id: payload.groupId },
@@ -133,6 +226,15 @@ export const createOffer = async (req: Request, res: Response) => {
 };
 
 export const updateOffer = async (req: Request<{ id: string }>, res: Response) => {
+  const authedReq = req as AuthedRequest;
+  const authUserId = authedReq.authUser?.id;
+  const authUserRole = authedReq.authUser?.role;
+
+  if (!authUserId) {
+    res.status(401).json({ message: "Unauthenticated" });
+    return;
+  }
+
   const offerId = String(req.params.id);
   const payload = z
     .object({
@@ -174,6 +276,26 @@ export const updateOffer = async (req: Request<{ id: string }>, res: Response) =
   if (!existingOffer) {
     res.status(404).json({ message: "Offer not found" });
     return;
+  }
+
+  if (authUserRole !== "ADMIN") {
+    const hasAccess = await prisma.jointOffer.findFirst({
+      where: {
+        id: offerId,
+        OR: [
+          { createdById: authUserId },
+          { participants: { some: { userId: authUserId } } },
+          { group: { members: { some: { userId: authUserId } } } },
+          { listing: { sellerId: authUserId } },
+        ],
+      },
+      select: { id: true },
+    });
+
+    if (!hasAccess) {
+      res.status(403).json({ message: "You are not allowed to access this offer" });
+      return;
+    }
   }
 
   if (
@@ -457,8 +579,23 @@ export const updateOfferParticipantDecision = async (
   req: Request<{ id: string; userId: string }>,
   res: Response
 ) => {
+  const authedReq = req as AuthedRequest;
+  const authUserId = authedReq.authUser?.id;
+  const authUserRole = authedReq.authUser?.role;
+
+  if (!authUserId) {
+    res.status(401).json({ message: "Unauthenticated" });
+    return;
+  }
+
   const offerId = String(req.params.id);
   const userId = String(req.params.userId);
+
+  if (authUserRole !== "ADMIN" && authUserId !== userId) {
+    res.status(403).json({ message: "You can only update your own decision" });
+    return;
+  }
+
   const payload = z
     .object({
       decision: z.enum(["PENDING", "APPROVED", "REJECTED"]),

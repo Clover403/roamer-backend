@@ -74,6 +74,21 @@ const DEFAULT_RENTAL_BANNERS: BannerItem[] = [
   },
 ];
 
+type HeroSettingsFileData = {
+  headline: string | null;
+  subheadline: string | null;
+  ctaLabel: string | null;
+  mediaPath: string | null;
+  marketplaceBanners: BannerItem[];
+  rentalBanners: BannerItem[];
+};
+
+const normalizeOptionalText = (value: unknown) => {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
+};
+
 const normalizeBannerList = (value: unknown, fallback: BannerItem[]) => {
   const parsed = z.array(bannerItemSchema).safeParse(value);
   if (!parsed.success) {
@@ -88,16 +103,24 @@ const normalizeBannerList = (value: unknown, fallback: BannerItem[]) => {
   return withThreeItems;
 };
 
-const readHeroSettingsFile = async () => {
+const readHeroSettingsFile = async (): Promise<HeroSettingsFileData> => {
   try {
     const raw = await storageService.readTextFile(HERO_SETTINGS_STORAGE_PATH);
     if (raw) {
       const data = JSON.parse(raw) as {
+        headline?: unknown;
+        subheadline?: unknown;
+        ctaLabel?: unknown;
+        mediaPath?: unknown;
         marketplaceBanners?: unknown;
         rentalBanners?: unknown;
       };
 
       return {
+        headline: normalizeOptionalText(data.headline),
+        subheadline: normalizeOptionalText(data.subheadline),
+        ctaLabel: normalizeOptionalText(data.ctaLabel),
+        mediaPath: normalizeOptionalText(data.mediaPath),
         marketplaceBanners: normalizeBannerList(data.marketplaceBanners, DEFAULT_MARKETPLACE_BANNERS),
         rentalBanners: normalizeBannerList(data.rentalBanners, DEFAULT_RENTAL_BANNERS),
       };
@@ -109,6 +132,10 @@ const readHeroSettingsFile = async () => {
   try {
     if (!fs.existsSync(HERO_SETTINGS_FILE)) {
       return {
+        headline: null,
+        subheadline: null,
+        ctaLabel: null,
+        mediaPath: null,
         marketplaceBanners: DEFAULT_MARKETPLACE_BANNERS,
         rentalBanners: DEFAULT_RENTAL_BANNERS,
       };
@@ -116,24 +143,40 @@ const readHeroSettingsFile = async () => {
 
     const raw = fs.readFileSync(HERO_SETTINGS_FILE, "utf8");
     const data = JSON.parse(raw) as {
+      headline?: unknown;
+      subheadline?: unknown;
+      ctaLabel?: unknown;
+      mediaPath?: unknown;
       marketplaceBanners?: unknown;
       rentalBanners?: unknown;
     };
 
     return {
+      headline: normalizeOptionalText(data.headline),
+      subheadline: normalizeOptionalText(data.subheadline),
+      ctaLabel: normalizeOptionalText(data.ctaLabel),
+      mediaPath: normalizeOptionalText(data.mediaPath),
       marketplaceBanners: normalizeBannerList(data.marketplaceBanners, DEFAULT_MARKETPLACE_BANNERS),
       rentalBanners: normalizeBannerList(data.rentalBanners, DEFAULT_RENTAL_BANNERS),
     };
   } catch {
     return {
+      headline: null,
+      subheadline: null,
+      ctaLabel: null,
+      mediaPath: null,
       marketplaceBanners: DEFAULT_MARKETPLACE_BANNERS,
       rentalBanners: DEFAULT_RENTAL_BANNERS,
     };
   }
 };
 
-const writeHeroSettingsFile = async (data: { marketplaceBanners: BannerItem[]; rentalBanners: BannerItem[] }) => {
+const writeHeroSettingsFile = async (data: HeroSettingsFileData) => {
   const normalized = {
+    headline: normalizeOptionalText(data.headline),
+    subheadline: normalizeOptionalText(data.subheadline),
+    ctaLabel: normalizeOptionalText(data.ctaLabel),
+    mediaPath: normalizeOptionalText(data.mediaPath),
     marketplaceBanners: normalizeBannerList(data.marketplaceBanners, DEFAULT_MARKETPLACE_BANNERS),
     rentalBanners: normalizeBannerList(data.rentalBanners, DEFAULT_RENTAL_BANNERS),
   };
@@ -273,11 +316,14 @@ const getHeroSettingsDelegate = () => {
 const getOrCreateHeroSettings = async () => {
   const delegate = getHeroSettingsDelegate();
   if (!delegate) {
-    if (process.env.NODE_ENV === "production") {
-      throw new Error("HeroSettings delegate is unavailable. Ensure Prisma client is generated and migrations are deployed.");
-    }
-
-    return heroSettingsFallback;
+    const fileSettings = await readHeroSettingsFile();
+    return {
+      ...heroSettingsFallback,
+      headline: fileSettings.headline ?? heroSettingsFallback.headline,
+      subheadline: fileSettings.subheadline ?? heroSettingsFallback.subheadline,
+      ctaLabel: fileSettings.ctaLabel ?? heroSettingsFallback.ctaLabel,
+      videoPath: fileSettings.mediaPath ?? heroSettingsFallback.videoPath,
+    };
   }
 
   const existing = await delegate.findFirst({ orderBy: { updatedAt: "desc" } });
@@ -299,13 +345,22 @@ const serializeHeroSettings = async (settings: {
   const ensuredFileSettings = await ensureHeroBannersStoredInGcp(fileSettings);
   if (ensuredFileSettings.changed) {
     await writeHeroSettingsFile({
+      headline: fileSettings.headline,
+      subheadline: fileSettings.subheadline,
+      ctaLabel: fileSettings.ctaLabel,
+      mediaPath: fileSettings.mediaPath,
       marketplaceBanners: ensuredFileSettings.marketplaceBanners,
       rentalBanners: ensuredFileSettings.rentalBanners,
     });
   }
 
-  const signedVideoUrl = settings.videoPath
-    ? await storageService.getSignedUrl(settings.videoPath, DEFAULT_SIGNED_URL_EXPIRY_MS)
+  const effectiveVideoPath = settings.videoPath ?? fileSettings.mediaPath;
+  const effectiveHeadline = settings.headline ?? fileSettings.headline;
+  const effectiveSubheadline = settings.subheadline ?? fileSettings.subheadline;
+  const effectiveCtaLabel = settings.ctaLabel ?? fileSettings.ctaLabel;
+
+  const signedVideoUrl = effectiveVideoPath
+    ? await storageService.getSignedUrl(effectiveVideoPath, DEFAULT_SIGNED_URL_EXPIRY_MS)
     : null;
   const signedMarketplaceBanners = await Promise.all(
     ensuredFileSettings.marketplaceBanners.map(async (banner) => ({
@@ -323,10 +378,10 @@ const serializeHeroSettings = async (settings: {
   return {
     id: settings.id,
     mediaUrl: signedVideoUrl,
-    mediaStoragePath: settings.videoPath,
-    headline: settings.headline,
-    subheadline: settings.subheadline,
-    ctaLabel: settings.ctaLabel,
+    mediaStoragePath: effectiveVideoPath,
+    headline: effectiveHeadline,
+    subheadline: effectiveSubheadline,
+    ctaLabel: effectiveCtaLabel,
     marketplaceBanners: signedMarketplaceBanners,
     rentalBanners: signedRentalBanners,
     updatedAt: settings.updatedAt,
@@ -354,6 +409,10 @@ export const updateAdminHeroSettings = async (req: Request, res: Response) => {
     rentalBanners: payload.rentalBanners ?? fileSettings.rentalBanners,
   });
   await writeHeroSettingsFile({
+    headline: settings.headline ?? fileSettings.headline,
+    subheadline: settings.subheadline ?? fileSettings.subheadline,
+    ctaLabel: settings.ctaLabel ?? fileSettings.ctaLabel,
+    mediaPath: settings.videoPath ?? fileSettings.mediaPath,
     marketplaceBanners: nextFileSettings.marketplaceBanners,
     rentalBanners: nextFileSettings.rentalBanners,
   });
@@ -363,7 +422,9 @@ export const updateAdminHeroSettings = async (req: Request, res: Response) => {
     if (payload.mediaUrl === null || payload.mediaUrl === "") {
       nextVideoPath = null;
     } else {
-      nextVideoPath = payload.mediaUrl;
+      const mediaInput = payload.mediaUrl.trim();
+      const looksLikeTemporarySignedUrl = /[?&]X-Goog-Algorithm=/.test(mediaInput);
+      nextVideoPath = looksLikeTemporarySignedUrl && settings.videoPath ? settings.videoPath : mediaInput;
     }
   }
 
@@ -377,6 +438,15 @@ export const updateAdminHeroSettings = async (req: Request, res: Response) => {
       updatedAt: new Date(),
     };
 
+    await writeHeroSettingsFile({
+      headline: heroSettingsFallback.headline,
+      subheadline: heroSettingsFallback.subheadline,
+      ctaLabel: heroSettingsFallback.ctaLabel,
+      mediaPath: heroSettingsFallback.videoPath,
+      marketplaceBanners: nextFileSettings.marketplaceBanners,
+      rentalBanners: nextFileSettings.rentalBanners,
+    });
+
     res.status(200).json(await serializeHeroSettings(heroSettingsFallback));
     return;
   }
@@ -389,6 +459,15 @@ export const updateAdminHeroSettings = async (req: Request, res: Response) => {
       ...(payload.ctaLabel !== undefined ? { ctaLabel: payload.ctaLabel } : {}),
       ...(payload.mediaUrl !== undefined ? { videoPath: nextVideoPath } : {}),
     },
+  });
+
+  await writeHeroSettingsFile({
+    headline: updated.headline,
+    subheadline: updated.subheadline,
+    ctaLabel: updated.ctaLabel,
+    mediaPath: updated.videoPath,
+    marketplaceBanners: nextFileSettings.marketplaceBanners,
+    rentalBanners: nextFileSettings.rentalBanners,
   });
 
   res.status(200).json(await serializeHeroSettings(updated));
@@ -424,6 +503,16 @@ export const uploadAdminHeroVideo = async (req: Request & { file?: Express.Multe
     if (settings.videoPath && settings.videoPath !== filePath && !isHttpUrl(settings.videoPath)) {
       await storageService.deleteFile(settings.videoPath);
     }
+
+    const fileSettings = await readHeroSettingsFile();
+    await writeHeroSettingsFile({
+      headline: updated.headline,
+      subheadline: updated.subheadline,
+      ctaLabel: updated.ctaLabel,
+      mediaPath: updated.videoPath,
+      marketplaceBanners: fileSettings.marketplaceBanners,
+      rentalBanners: fileSettings.rentalBanners,
+    });
 
     res.status(200).json(await serializeHeroSettings(updated));
   } catch (error) {

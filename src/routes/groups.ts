@@ -27,6 +27,7 @@ const upload = multer({
 
 groupsRouter.get(
   "/",
+  requireAuth,
   asyncHandler(listGroups)
 );
 
@@ -45,36 +46,43 @@ groupsRouter.post(
 
 groupsRouter.get(
   "/:id",
+  requireAuth,
   asyncHandler(getGroupById)
 );
 
 groupsRouter.post(
   "/:id/members",
+  requireAuth,
   asyncHandler(addGroupMember)
 );
 
 groupsRouter.patch(
   "/:id/members/:userId/confirm",
+  requireAuth,
   asyncHandler(confirmGroupMemberTerms)
 );
 
 groupsRouter.delete(
   "/:id/members/:userId",
+  requireAuth,
   asyncHandler(removeGroupMember)
 );
 
 groupsRouter.delete(
   "/:id",
+  requireAuth,
   asyncHandler(deleteGroup)
 );
 
 groupsRouter.post(
   "/:id/invitations",
+  requireAuth,
   asyncHandler(createGroupInvitation)
 );
 
 groupsRouter.patch(
   "/invitations/:invitationId",
+  requireAuth,
   asyncHandler(updateInvitationStatus)
 );
 
