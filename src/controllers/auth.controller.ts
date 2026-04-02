@@ -3,7 +3,7 @@ import { z } from "zod";
 import bcrypt from "bcryptjs";
 import crypto from "crypto";
 import { prisma } from "../lib/prisma";
-import { clearAuthCookie, setAuthCookie, signAuthToken, verifyAuthToken } from "../lib/auth";
+import { clearAuthCookie, getAuthTokenFromRequest, setAuthCookie, signAuthToken, verifyAuthToken } from "../lib/auth";
 import { env } from "../config/env";
 import { sanitizePlainText } from "../lib/security";
 
@@ -347,7 +347,7 @@ export const login = async (req: Request, res: Response) => {
 export const me = async (req: Request, res: Response) => {
   setAuthNoStoreHeaders(res);
 
-  const token = req.cookies?.[env.JWT_COOKIE_NAME] as string | undefined;
+  const token = getAuthTokenFromRequest(req);
 
   if (!token) {
     res.status(401).json({ message: "Unauthenticated" });
@@ -398,7 +398,7 @@ export const me = async (req: Request, res: Response) => {
 export const logout = async (_req: Request, res: Response) => {
   setAuthNoStoreHeaders(res);
 
-  const token = _req.cookies?.[env.JWT_COOKIE_NAME] as string | undefined;
+  const token = getAuthTokenFromRequest(_req);
 
   if (token) {
     try {

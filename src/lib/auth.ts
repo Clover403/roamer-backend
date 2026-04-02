@@ -1,5 +1,5 @@
 import jwt, { type SignOptions } from "jsonwebtoken";
-import type { Response } from "express";
+import type { Request, Response } from "express";
 import { env } from "../config/env";
 
 export type AuthJwtPayload = {
@@ -18,6 +18,61 @@ export const signAuthToken = (payload: AuthJwtPayload) => {
 
 export const verifyAuthToken = (token: string) => {
   return jwt.verify(token, env.JWT_SECRET) as AuthJwtPayload;
+};
+
+const safeDecodeCookieValue = (value: string) => {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+};
+
+const getRawCookieCandidates = (req: Request, cookieName: string) => {
+  const rawHeader = req.headers.cookie;
+  if (!rawHeader) return [] as string[];
+
+  return rawHeader
+    .split(";")
+    .map((part) => part.trim())
+    .filter((part) => part.startsWith(`${cookieName}=`))
+    .map((part) => safeDecodeCookieValue(part.slice(cookieName.length + 1)))
+    .filter(Boolean);
+};
+
+export const getAuthTokenFromRequest = (req: Request) => {
+  const candidates = new Set<string>();
+
+  const cookieParserToken = req.cookies?.[env.JWT_COOKIE_NAME] as string | undefined;
+  if (cookieParserToken) {
+    candidates.add(cookieParserToken);
+  }
+
+  for (const token of getRawCookieCandidates(req, env.JWT_COOKIE_NAME)) {
+    candidates.add(token);
+  }
+
+  if (candidates.size === 0) return undefined;
+
+  let newestValidToken: string | undefined;
+  let newestIat = -1;
+
+  for (const token of candidates) {
+    try {
+      const payload = jwt.verify(token, env.JWT_SECRET) as jwt.JwtPayload;
+      const iat = typeof payload.iat === "number" ? payload.iat : 0;
+      if (iat >= newestIat) {
+        newestIat = iat;
+        newestValidToken = token;
+      }
+    } catch {
+      // ignore invalid candidates and continue checking others
+    }
+  }
+
+  if (newestValidToken) return newestValidToken;
+
+  return Array.from(candidates)[0];
 };
 
 export const setAuthCookie = (res: Response, token: string) => {

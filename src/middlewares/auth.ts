@@ -1,6 +1,5 @@
 import type { NextFunction, Request, Response } from "express";
-import { env } from "../config/env";
-import { verifyAuthToken } from "../lib/auth";
+import { getAuthTokenFromRequest, verifyAuthToken } from "../lib/auth";
 import { prisma } from "../lib/prisma";
 
 type AuthedRequest = Request & {
@@ -11,7 +10,7 @@ type AuthedRequest = Request & {
 };
 
 export const requireAuth = async (req: AuthedRequest, res: Response, next: NextFunction) => {
-  const token = req.cookies?.[env.JWT_COOKIE_NAME] as string | undefined;
+  const token = getAuthTokenFromRequest(req);
 
   if (!token) {
     res.status(401).json({ message: "Unauthenticated" });
