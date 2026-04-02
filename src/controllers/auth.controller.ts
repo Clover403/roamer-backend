@@ -192,6 +192,12 @@ const redirectGoogleSuccess = (res: Response) => {
   res.redirect(target.toString());
 };
 
+const setAuthNoStoreHeaders = (res: Response) => {
+  res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, private");
+  res.setHeader("Pragma", "no-cache");
+  res.setHeader("Expires", "0");
+};
+
 export const register = async (req: Request, res: Response) => {
   const rawPayload = registerSchema.parse(req.body);
   const payload = {
@@ -293,6 +299,8 @@ export const register = async (req: Request, res: Response) => {
 };
 
 export const login = async (req: Request, res: Response) => {
+  setAuthNoStoreHeaders(res);
+
   const rawPayload = loginSchema.parse(req.body);
   const payload = {
     ...rawPayload,
@@ -327,6 +335,7 @@ export const login = async (req: Request, res: Response) => {
     role: user.role,
   });
 
+  clearAuthCookie(res);
   setAuthCookie(res, token);
 
   res.status(200).json({
@@ -336,6 +345,8 @@ export const login = async (req: Request, res: Response) => {
 };
 
 export const me = async (req: Request, res: Response) => {
+  setAuthNoStoreHeaders(res);
+
   const token = req.cookies?.[env.JWT_COOKIE_NAME] as string | undefined;
 
   if (!token) {
@@ -385,6 +396,8 @@ export const me = async (req: Request, res: Response) => {
 };
 
 export const logout = async (_req: Request, res: Response) => {
+  setAuthNoStoreHeaders(res);
+
   const token = _req.cookies?.[env.JWT_COOKIE_NAME] as string | undefined;
 
   if (token) {
@@ -682,6 +695,7 @@ export const googleAuthCallback = async (req: Request, res: Response) => {
       role: user.role,
     });
 
+    clearAuthCookie(res);
     setAuthCookie(res, token);
     redirectGoogleSuccess(res);
   } catch {
