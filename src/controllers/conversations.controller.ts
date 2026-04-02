@@ -53,6 +53,12 @@ const signAttachmentUrl = async (attachmentUrl?: string | null) => {
 
 const withSignedConversationAssets = async (conversation: any) => ({
   ...conversation,
+  group: conversation.group
+    ? {
+        ...conversation.group,
+        description: await signAvatarUrl(conversation.group.description),
+      }
+    : conversation.group,
   participants: await Promise.all(
     (conversation.participants ?? []).map(async (participant: any) => ({
       ...participant,

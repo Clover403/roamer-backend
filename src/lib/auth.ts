@@ -74,6 +74,8 @@ export const getAuthTokenFromRequest = (req: Request) => {
 };
 
 export const setAuthCookie = (res: Response, token: string) => {
+  const shouldUseCookieDomain = env.NODE_ENV === "production" && Boolean(env.JWT_COOKIE_DOMAIN);
+
   // fix: set cookie sekali saja, jangan double set
   res.cookie(env.JWT_COOKIE_NAME, token, {
     httpOnly: true,
@@ -81,11 +83,12 @@ export const setAuthCookie = (res: Response, token: string) => {
     secure: env.NODE_ENV === "production",
     maxAge: env.JWT_COOKIE_MAX_AGE_MS,
     path: "/",
-    ...(env.JWT_COOKIE_DOMAIN ? { domain: env.JWT_COOKIE_DOMAIN } : {}),
+    ...(shouldUseCookieDomain ? { domain: env.JWT_COOKIE_DOMAIN } : {}),
   });
 };
 
 export const clearAuthCookie = (res: Response) => {
+  const shouldUseCookieDomain = env.NODE_ENV === "production" && Boolean(env.JWT_COOKIE_DOMAIN);
   const sameSiteVariants: Array<"lax" | "strict" | "none"> = ["lax", "strict", "none"];
 
   const clearVariants: Array<{
@@ -97,7 +100,7 @@ export const clearAuthCookie = (res: Response) => {
     ...sameSiteVariants.map((sameSite) => ({ secure: false, sameSite })),
   ];
 
-  if (env.JWT_COOKIE_DOMAIN) {
+  if (shouldUseCookieDomain && env.JWT_COOKIE_DOMAIN) {
     for (const sameSite of sameSiteVariants) {
       clearVariants.push(
         { secure: true, sameSite, domain: env.JWT_COOKIE_DOMAIN },

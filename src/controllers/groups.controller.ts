@@ -82,6 +82,51 @@ export const listGroups = async (req: Request, res: Response) => {
   res.status(200).json(signedItems);
 };
 
+export const listPublicGroups = async (req: Request, res: Response) => {
+  await purgeCancelledGroups(prisma);
+
+  const { listingId } = req.query;
+
+  const where: Record<string, unknown> = {
+    isPublic: true,
+    status: {
+      in: ["FORMING", "ACTIVE"],
+    },
+  };
+
+  if (listingId) {
+    where.listingId = String(listingId);
+  }
+
+  const items = await prisma.group.findMany({
+    where,
+    include: {
+      members: {
+        include: {
+          user: {
+            select: {
+              id: true,
+              fullName: true,
+              avatarUrl: true,
+            },
+          },
+        },
+      },
+      listing: true,
+    },
+    orderBy: { createdAt: "desc" },
+  });
+
+  const signedItems = await Promise.all(
+    items.map(async (item: (typeof items)[number]) => ({
+      ...item,
+      description: await signGroupImageField(item.description),
+    }))
+  );
+
+  res.status(200).json(signedItems);
+};
+
 export const createGroup = async (req: Request, res: Response) => {
   const authedReq = req as AuthedRequest;
   const authUserId = authedReq.authUser?.id;

@@ -10,6 +10,7 @@ import {
   deleteGroup,
   getGroupById,
   listGroups,
+  listPublicGroups,
   removeGroupMember,
   updateGroupProfileImage,
   updateInvitationStatus,
@@ -24,6 +25,11 @@ const upload = multer({
     fileSize: 8 * 1024 * 1024,
   },
 });
+
+groupsRouter.get(
+  "/public",
+  asyncHandler(listPublicGroups)
+);
 
 groupsRouter.get(
   "/",

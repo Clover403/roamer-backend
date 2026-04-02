@@ -13,6 +13,7 @@ type AuthedRequest = Request & {
 
 type GarageAssetResponse = {
   id: string;
+  listingId: string;
   assetType: "OWNED" | "RENTED" | "INACTIVE";
   rentalRequestId?: string | null;
   rentalStatus?: "REQUESTED" | "APPROVED" | "ACTIVE" | null;
@@ -366,25 +367,49 @@ export const reactivateMyGarageAsset = async (req: AuthedRequest, res: Response)
     },
   });
 
-  if (!inactiveAsset) {
-    res.status(404).json({ message: "Inactive garage asset not found" });
-    return;
-  }
-
   const ownedAsset = await prisma.garageAsset.findFirst({
     where: {
       userId,
       listingId,
       assetType: "OWNED",
     },
-    select: { id: true },
+    select: { id: true, currentValue: true },
   });
+
+  const legacyInactiveAsset = inactiveAsset
+    ? null
+    : await prisma.garageAsset.findFirst({
+        where: {
+          userId,
+          listingId,
+          assetType: "SAVED",
+        },
+        select: {
+          id: true,
+          currentValue: true,
+        },
+      });
+
+  const sourceInactiveAsset = inactiveAsset ?? legacyInactiveAsset;
+
+  if (!sourceInactiveAsset) {
+    if (ownedAsset) {
+      res.status(200).json({
+        listingId,
+        assetType: "OWNED",
+      });
+      return;
+    }
+
+    res.status(404).json({ message: "Inactive garage asset not found" });
+    return;
+  }
 
   await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
     if (ownedAsset) {
       await tx.garageAsset.update({
         where: { id: ownedAsset.id },
-        data: { currentValue: inactiveAsset.currentValue },
+        data: { currentValue: sourceInactiveAsset.currentValue ?? ownedAsset.currentValue },
       });
     } else {
       await tx.garageAsset.create({
@@ -392,14 +417,14 @@ export const reactivateMyGarageAsset = async (req: AuthedRequest, res: Response)
           userId,
           listingId,
           assetType: "OWNED",
-          currentValue: inactiveAsset.currentValue,
+          currentValue: sourceInactiveAsset.currentValue,
           notes: "Reactivated from inactive asset",
         },
       });
     }
 
     await tx.garageAsset.delete({
-      where: { id: inactiveAsset.id },
+      where: { id: sourceInactiveAsset.id },
     });
   });
 
@@ -623,6 +648,7 @@ export const listMyGarageAssets = async (req: AuthedRequest, res: Response) => {
 
     const item: GarageAssetResponse = {
       id: listing.id,
+      listingId: listing.id,
       assetType: isRentalAsset ? "RENTED" : isInactiveAsset ? "INACTIVE" : "OWNED",
       rentalRequestId: activeRental?.id ?? null,
       rentalStatus: activeRental?.status ?? null,
