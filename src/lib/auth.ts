@@ -31,7 +31,6 @@ const safeDecodeCookieValue = (value: string) => {
 const getRawCookieCandidates = (req: Request, cookieName: string) => {
   const rawHeader = req.headers.cookie;
   if (!rawHeader) return [] as string[];
-
   return rawHeader
     .split(";")
     .map((part) => part.trim())
@@ -61,42 +60,34 @@ export const getAuthTokenFromRequest = (req: Request) => {
     try {
       const payload = jwt.verify(token, env.JWT_SECRET) as jwt.JwtPayload;
       const iat = typeof payload.iat === "number" ? payload.iat : 0;
-      if (iat >= newestIat) {
+      if (iat > newestIat) { // fix: strict > bukan >=
         newestIat = iat;
         newestValidToken = token;
       }
     } catch {
-      // ignore invalid candidates and continue checking others
+      // ignore invalid candidates
     }
   }
 
   if (newestValidToken) return newestValidToken;
-
   return Array.from(candidates)[0];
 };
 
 export const setAuthCookie = (res: Response, token: string) => {
-  const baseOptions = {
+  // fix: set cookie sekali saja, jangan double set
+  res.cookie(env.JWT_COOKIE_NAME, token, {
     httpOnly: true,
     sameSite: env.JWT_COOKIE_SAME_SITE,
     secure: env.NODE_ENV === "production",
     maxAge: env.JWT_COOKIE_MAX_AGE_MS,
     path: "/",
-  } as const;
-
-  if (env.JWT_COOKIE_DOMAIN) {
-    res.cookie(env.JWT_COOKIE_NAME, token, {
-      ...baseOptions,
-      domain: env.JWT_COOKIE_DOMAIN,
-    });
-  }
-
-  // Also set host-only cookie to avoid stale domain/host cookie collisions.
-  res.cookie(env.JWT_COOKIE_NAME, token, baseOptions);
+    ...(env.JWT_COOKIE_DOMAIN ? { domain: env.JWT_COOKIE_DOMAIN } : {}),
+  });
 };
 
 export const clearAuthCookie = (res: Response) => {
   const sameSiteVariants: Array<"lax" | "strict" | "none"> = ["lax", "strict", "none"];
+
   const clearVariants: Array<{
     secure: boolean;
     sameSite: "lax" | "strict" | "none";
