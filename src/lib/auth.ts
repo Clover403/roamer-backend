@@ -96,25 +96,29 @@ export const setAuthCookie = (res: Response, token: string) => {
 };
 
 export const clearAuthCookie = (res: Response) => {
+  const sameSiteVariants: Array<"lax" | "strict" | "none"> = ["lax", "strict", "none"];
   const clearVariants: Array<{
     secure: boolean;
+    sameSite: "lax" | "strict" | "none";
     domain?: string;
   }> = [
-    { secure: true },
-    { secure: false },
+    ...sameSiteVariants.map((sameSite) => ({ secure: true, sameSite })),
+    ...sameSiteVariants.map((sameSite) => ({ secure: false, sameSite })),
   ];
 
   if (env.JWT_COOKIE_DOMAIN) {
-    clearVariants.push(
-      { secure: true, domain: env.JWT_COOKIE_DOMAIN },
-      { secure: false, domain: env.JWT_COOKIE_DOMAIN },
-    );
+    for (const sameSite of sameSiteVariants) {
+      clearVariants.push(
+        { secure: true, sameSite, domain: env.JWT_COOKIE_DOMAIN },
+        { secure: false, sameSite, domain: env.JWT_COOKIE_DOMAIN },
+      );
+    }
   }
 
   for (const variant of clearVariants) {
     res.clearCookie(env.JWT_COOKIE_NAME, {
       httpOnly: true,
-      sameSite: env.JWT_COOKIE_SAME_SITE,
+      sameSite: variant.sameSite,
       secure: variant.secure,
       path: "/",
       domain: variant.domain,
