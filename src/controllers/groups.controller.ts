@@ -88,7 +88,6 @@ export const listPublicGroups = async (req: Request, res: Response) => {
   const { listingId } = req.query;
 
   const where: Record<string, unknown> = {
-    isPublic: true,
     status: {
       in: ["FORMING", "ACTIVE"],
     },
@@ -205,7 +204,7 @@ export const createGroup = async (req: Request, res: Response) => {
       name: payload.name,
       targetPriceAed: payload.targetPriceAed,
       maxMembers: normalizedMaxMembers,
-      isPublic: payload.isPublic ?? true,
+      isPublic: true,
       description: payload.description,
       members: {
         create: {
